@@ -69,6 +69,8 @@ RUN_NAME=debug_b2w MAX_ITERATIONS=300 ./scripts/train_nav.sh
 self.commands.robot_goal.position_table_device = "cpu"
 ```
 
+如需查看无人机任务的日常启动命令与 `SwarmCompat` 单机预训练示例，请参考 [DRONE_TRAINING_USAGE.md](DRONE_TRAINING_USAGE.md)。
+
 ## 拓扑引导奖励
 
 轨迹引导版无人机任务（`Isaac-Nav-PPO-Drone-Static-v0` 及其 `Dev` / `Play` 变体）会在原始 point-goal 奖励之外，额外加入一个拓扑引导项。

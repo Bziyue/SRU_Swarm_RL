@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import argparse
 import pickle
+import shlex
+import subprocess
 import sys
 
 # Add the parent directory to the path so we can import from the extension
@@ -115,6 +117,155 @@ def dump_pickle_file(filename: str, data):
         pickle.dump(data, f)
 
 
+def run_text_command(command: list[str], cwd: str | None = None) -> str | None:
+    """Run a subprocess and return stripped stdout on success."""
+    try:
+        return subprocess.check_output(command, cwd=cwd, stderr=subprocess.DEVNULL, text=True).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+def get_workspace_root() -> str:
+    """Resolve the workspace root from this script location."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    sim_root = os.path.dirname(script_dir)
+    return os.path.dirname(sim_root)
+
+
+def get_git_context(repo_root: str) -> dict[str, str]:
+    """Collect git branch / commit information for the current workspace."""
+    branch = run_text_command(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_root) or "unknown"
+    commit = run_text_command(["git", "rev-parse", "HEAD"], cwd=repo_root) or "unknown"
+    status = run_text_command(["git", "status", "--short"], cwd=repo_root) or ""
+    return {
+        "branch": branch,
+        "commit": commit,
+        "dirty": "yes" if bool(status) else "no",
+    }
+
+
+def infer_play_task(train_task: str) -> str | None:
+    """Infer the matching play task from the training task id."""
+    if train_task.endswith("-Play-v0") or train_task.endswith("-PlayFast-v0"):
+        return train_task
+    if train_task.endswith("-Dev-v0"):
+        return train_task[: -len("-Dev-v0")] + "-Play-v0"
+    if train_task.endswith("-v0"):
+        return train_task[: -len("-v0")] + "-Play-v0"
+    return None
+
+
+def build_fallback_train_command(args_cli, workspace_root: str) -> str:
+    """Build a reproducible training command when the shell launcher did not provide one."""
+    command_tokens = []
+
+    headless_value = os.environ.get("NAV_TRAIN_HEADLESS")
+    if headless_value is None:
+        headless_value = "1" if getattr(args_cli, "headless", False) else "0"
+    command_tokens.append(f"HEADLESS={headless_value}")
+
+    if args_cli.num_envs is not None:
+        command_tokens.append(f"NUM_ENVS={args_cli.num_envs}")
+    if args_cli.max_iterations is not None:
+        command_tokens.append(f"MAX_ITERATIONS={args_cli.max_iterations}")
+    if args_cli.run_name is not None:
+        command_tokens.append(f"RUN_NAME={args_cli.run_name}")
+    if args_cli.seed is not None:
+        command_tokens.append(f"SEED={args_cli.seed}")
+
+    command_tokens.extend(["./scripts/train_nav.sh", args_cli.task])
+    command_tokens.extend(hydra_args)
+
+    conda_base = run_text_command(["conda", "info", "--base"])
+    conda_env_name = os.environ.get("NAV_CONDA_ENV_NAME") or os.environ.get("CONDA_DEFAULT_ENV") or "env_isaacsim"
+
+    lines = []
+    if conda_base:
+        lines.append(shlex.join(["source", os.path.join(conda_base, "etc", "profile.d", "conda.sh")]))
+    lines.append(shlex.join(["conda", "activate", conda_env_name]))
+    lines.append(shlex.join(["cd", workspace_root]))
+    lines.append(shlex.join(command_tokens))
+    return "\n".join(lines)
+
+
+def build_play_command_snippet(
+    workspace_root: str, play_task: str | None, log_dir: str | None
+) -> str | None:
+    """Build a reproducible play command for the current training run."""
+    if play_task is None or log_dir is None:
+        return None
+
+    conda_base = run_text_command(["conda", "info", "--base"])
+    conda_env_name = os.environ.get("NAV_CONDA_ENV_NAME") or os.environ.get("CONDA_DEFAULT_ENV") or "env_isaacsim"
+    log_dir_rel = os.path.relpath(log_dir, workspace_root)
+
+    lines = []
+    if conda_base:
+        lines.append(shlex.join(["source", os.path.join(conda_base, "etc", "profile.d", "conda.sh")]))
+    lines.append(shlex.join(["conda", "activate", conda_env_name]))
+    lines.append(shlex.join(["cd", workspace_root]))
+    lines.append(
+        (
+            f'CHECKPOINT="$(find {shlex.quote(log_dir_rel)} -maxdepth 1 -type f -name '
+            f'{shlex.quote("model_*.pt")} | sort | tail -n 1)" '
+            f'HEADLESS=0 NUM_ENVS=1 ./scripts/play_nav.sh {shlex.quote(play_task)}'
+        )
+    )
+    return "\n".join(lines)
+
+
+def write_repro_log(log_dir: str, args_cli, agent_cfg) -> None:
+    """Persist git context and reproducible commands alongside the training logs."""
+    workspace_root = os.environ.get("NAV_WORKSPACE_ROOT") or get_workspace_root()
+    git_context = get_git_context(workspace_root)
+    play_task = infer_play_task(args_cli.task)
+
+    train_command = os.environ.get("NAV_TRAIN_LAUNCH_CMD_FULL") or build_fallback_train_command(args_cli, workspace_root)
+    play_command = build_play_command_snippet(workspace_root, play_task, log_dir)
+
+    repro_log_path = os.path.join(log_dir, "repro_commands.sh")
+    log_dir_rel = os.path.relpath(log_dir, workspace_root)
+
+    lines = [
+        "#!/usr/bin/env bash",
+        f"# Workspace root: {workspace_root}",
+        f"# Git branch: {git_context['branch']}",
+        f"# Git commit: {git_context['commit']}",
+        f"# Git dirty: {git_context['dirty']}",
+        f"# Train task: {args_cli.task}",
+        f"# Play task: {play_task or 'unavailable'}",
+        f"# Log dir: {log_dir_rel}",
+        "# Play checkpoint strategy: latest model_*.pt under this run directory",
+        "",
+        "# Training command",
+        train_command,
+        "",
+    ]
+
+    if play_command is not None:
+        lines.extend(
+            [
+                "# Play command",
+                play_command,
+                "",
+            ]
+        )
+
+    with open(repro_log_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    os.chmod(repro_log_path, 0o755)
+
+    print(f"[INFO] Workspace git branch: {git_context['branch']}")
+    print(f"[INFO] Workspace git commit: {git_context['commit']}")
+    print(f"[INFO] Workspace git dirty: {git_context['dirty']}")
+    print(f"[INFO] Repro command log written to: {repro_log_path}")
+    print("[INFO] Training command for this run:")
+    print(train_command)
+    if play_command is not None:
+        print("[INFO] Suggested play command for this run:")
+        print(play_command)
+
+
 def main():
     """Train navigation policy with RSL-RL."""
     # Load the configurations from the registry
@@ -169,6 +320,7 @@ def main():
     sys.stdout = TeeStream(sys.__stdout__, console_log_file)
     sys.stderr = TeeStream(sys.__stderr__, console_log_file)
     print(f"[INFO] Writing console log to: {console_log_path}")
+    write_repro_log(log_dir, args_cli, agent_cfg)
 
     # Create runner
     runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
