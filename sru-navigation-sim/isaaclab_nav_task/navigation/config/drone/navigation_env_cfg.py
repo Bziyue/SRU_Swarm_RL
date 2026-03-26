@@ -24,7 +24,7 @@ from isaaclab_nav_task.navigation.mdp.custom_noise import DeltaTransformationNoi
 from isaaclab_nav_task.navigation.mdp.delay_manager import ObservationDelayManagerCfg
 
 
-PLANNING_FREQ = 5.0
+PLANNING_FREQ = 20.0
 STATIC_SCAN_DIR = os.path.join(ISAACLAB_NAV_TASKS_ASSETS_DIR, "Environments", "StaticScan")
 STATIC_VISUAL_MESH_PRIM_PATH = "/World/StaticMesh"
 STATIC_COLLISION_MESH_PRIM_PATH = "/World/MapMesh"
@@ -416,7 +416,7 @@ class DroneStaticNavigationEnvCfg_PLAY_FAST(DroneStaticNavigationEnvCfg):
         self.commands.robot_goal.visualize_region_safe_points = False
         self.commands.robot_goal.visualize_region_boxes = False
         self.observations.policy.enable_corruption = False
-        # Render more frequently than the 5 Hz control loop so local playback looks smooth.
+        # Render more frequently than the 20 Hz control loop so local playback looks smooth.
         self.sim.render_interval = 4
 
 
@@ -443,7 +443,7 @@ class DroneStaticNavigationEnvCfg_SWARM_COMPAT_PLAY_FAST(DroneStaticNavigationEn
         self.commands.robot_goal.visualize_region_safe_points = False
         self.commands.robot_goal.visualize_region_boxes = False
         self.observations.policy.enable_corruption = False
-        # Render more frequently than the 5 Hz control loop so local playback looks smooth.
+        # Render more frequently than the 20 Hz control loop so local playback looks smooth.
         self.sim.render_interval = 4
 
 

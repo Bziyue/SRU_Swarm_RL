@@ -17,7 +17,7 @@ from isaaclab_nav_task.navigation.mdp.depth_utils.camera_config import get_camer
 from isaaclab_nav_task.navigation.mdp.observations import initialize_depth_noise_generator
 
 
-PLANNING_FREQ = 5.0
+PLANNING_FREQ = 20.0
 STATIC_SCAN_DIR = os.path.join(ISAACLAB_NAV_TASKS_ASSETS_DIR, "Environments", "StaticScan")
 STATIC_VISUAL_MESH_PRIM_PATH = "/World/StaticMesh"
 STATIC_COLLISION_MESH_PRIM_PATH = "/World/MapMesh"
