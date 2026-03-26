@@ -11,9 +11,9 @@ from isaaclab_nav_task.navigation.config.rl_cfg import (
 
 @configclass
 class DroneStaticNavPPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    # Use a longer rollout that is feasible with 2048 environments while
-    # restoring more temporal context at 20 Hz control.
-    num_steps_per_env = 32
+    # Restore a ~3.2 s rollout horizon at 20 Hz control. This is feasible on the
+    # target 2048-env server setup and better matches the old 5 Hz training context.
+    num_steps_per_env = 64
     max_iterations = 15000
     save_interval = 500
     logger = "tensorboard"
