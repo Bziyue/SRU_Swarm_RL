@@ -1,0 +1,66 @@
+# Prerequisites
+*.d
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Linker files
+*.ilk
+
+# Debugger Files
+*.pdb
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Fortran module files
+*.mod
+*.smod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# debug information files
+*.dwo
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Editor / OS files
+*.swp
+*.swo
+.DS_Store
+
+# Workspace-level ROS2 / colcon build artifacts
+/build/
+/install/
+/log/
+
+# Package-level ROS2 / CMake build artifacts
+/voxel_guidance_ros2/build/
+/voxel_guidance_ros2/install/
+/voxel_guidance_ros2/log/
+/voxel_guidance_ros2/CMakeCache.txt
+/voxel_guidance_ros2/CMakeFiles/
+/voxel_guidance_ros2/Makefile
+/voxel_guidance_ros2/cmake_install.cmake
+/voxel_guidance_ros2/compile_commands.json
+/voxel_guidance_ros2/Testing/

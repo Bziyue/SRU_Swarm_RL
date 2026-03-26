@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>voxel_guidance_ros2</name>
+  <version>0.0.1</version>
+  <description>ROS 2 voxel guidance planner and visualization node for indoor region-to-region routing.</description>
+
+  <maintainer email="zdp@example.com">zdp</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>eigen3_cmake_module</buildtool_depend>
+
+  <depend>eigen</depend>
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>std_msgs</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
