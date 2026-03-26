@@ -314,7 +314,10 @@ class DroneEventCfg:
 
 @configclass
 class DroneRewardsCfg:
-    action_rate_l1 = RewTerm(func=mdp.action_rate_l1, weight=-0.05)
+    # These dense terms are evaluated every policy step. Since the high-level policy
+    # now runs at 20 Hz instead of 5 Hz, scale them by 0.25 to preserve roughly
+    # the same per-second contribution as the original 5 Hz setup.
+    action_rate_l1 = RewTerm(func=mdp.action_rate_l1, weight=-0.0125)
     guidance_progress = RewTerm(
         func=mdp.guidance_progress_reward,
         weight=0.7,
@@ -327,18 +330,18 @@ class DroneRewardsCfg:
     )
     guidance_lateral_error = RewTerm(
         func=mdp.guidance_lateral_error_penalty,
-        weight=-0.25,
+        weight=-0.0625,
         params={"command_name": "robot_goal", "sigma": 0.6},
     )
     episode_termination = RewTerm(func=mdp.is_terminated, weight=-50.0)
     reach_goal_xy_soft = RewTerm(
         func=mdp.reach_goal_xyz,
-        weight=0.25,
+        weight=0.0625,
         params={"command_name": "robot_goal", "sigmoid": 2.5, "T_r": 1.0, "probability": 0.01, "flat": True, "ratio": False},
     )
     reach_goal_xy_tight = RewTerm(
         func=mdp.reach_goal_xyz,
-        weight=1.5,
+        weight=0.375,
         params={"command_name": "robot_goal", "sigmoid": 0.25, "T_r": 0.1, "probability": 0.01, "flat": True, "ratio": False},
     )
 

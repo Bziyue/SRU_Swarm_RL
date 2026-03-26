@@ -11,7 +11,9 @@ from isaaclab_nav_task.navigation.config.rl_cfg import (
 
 @configclass
 class DroneStaticNavPPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    num_steps_per_env = 16
+    # Keep roughly the same rollout duration in wall-clock time after moving the
+    # high-level policy from 5 Hz to 20 Hz: 16 * 0.2 s ~= 64 * 0.05 s.
+    num_steps_per_env = 64
     max_iterations = 15000
     save_interval = 500
     logger = "tensorboard"
@@ -44,8 +46,10 @@ class DroneStaticNavPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         num_mini_batches=4,
         learning_rate=1.0e-3,
         schedule="adaptive",
-        gamma=0.995,
-        lam=0.95,
+        # Match the original 5 Hz per-second discount / GAE decay after moving to
+        # 20 Hz control.
+        gamma=0.9987476502,
+        lam=0.9872585449,
         desired_kl=0.01,
         max_grad_norm=1.0,
     )
