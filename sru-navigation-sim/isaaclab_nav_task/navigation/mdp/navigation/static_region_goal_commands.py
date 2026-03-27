@@ -53,6 +53,20 @@ class SuccessRateTracker:
         return success_count.float() / filled_count.float()
 
 
+def _compute_region_goal_anchor(region: dict, safe_points: np.ndarray) -> np.ndarray:
+    """Return the safe point closest to the region center.
+
+    If a region has no safe points, fall back to the geometric region center at flight height.
+    """
+    if len(safe_points) == 0:
+        return np.asarray(region["center"], dtype=np.float32).copy()
+
+    center_xy = np.asarray(region["center_xy"], dtype=np.float32)
+    distances = np.linalg.norm(safe_points[:, :2] - center_xy[None, :], axis=1)
+    goal_idx = int(np.argmin(distances))
+    return np.asarray(safe_points[goal_idx], dtype=np.float32).copy()
+
+
 def _load_region_boxes(path: str) -> list[dict]:
     regions: list[dict] = []
     current_name: str | None = None
@@ -236,6 +250,7 @@ def _load_precomputed_region_point_sets(
         region = dict(base_region)
         region["center"] = np.array([region["center_xy"][0], region["center_xy"][1], float(flight_height)], dtype=np.float32)
         region["safe_points"] = safe_points.astype(np.float32, copy=False)
+        region["goal_anchor"] = _compute_region_goal_anchor(region, region["safe_points"])
         loaded_regions.append(region)
         if len(safe_points) > 0:
             all_safe_points.append(safe_points.astype(np.float32, copy=False))
@@ -293,6 +308,7 @@ def _build_region_point_sets(
         )
         region["center"] = np.array([region["center_xy"][0], region["center_xy"][1], flight_height], dtype=np.float32)
         region["safe_points"] = points
+        region["goal_anchor"] = _compute_region_goal_anchor(region, points)
         if len(points) > 0:
             all_safe_points.append(points)
 

@@ -212,6 +212,7 @@ class DroneSwarmNavigationEnvCfg(DirectMARLEnvCfg):
     action_scale: tuple[float, float, float] = (2.5, 2.5, 1.5)
     max_speed: float = 2.5
     depth_include_teammates: bool = False
+    goal_sampling_mode: str = "region_center_anchor"
     teammate_observation_radius: float = 6.0
     disable_teammate_observations: bool = False
     solo_pretraining: bool = False
@@ -223,8 +224,8 @@ class DroneSwarmNavigationEnvCfg(DirectMARLEnvCfg):
     swarm_penalty_scale_max: float = 1.0
     swarm_penalty_scale_warmup_iters: int = 150
     swarm_penalty_scale_ramp_iters: int = 1200
-    enable_cluster_collision_termination: bool = True
-    cluster_collision_termination_mode: str = "curriculum"
+    enable_cluster_collision_termination: bool = False
+    cluster_collision_termination_mode: str = "always_off"
     cluster_collision_termination_warmup_iters: int = 1200
 
     initial_formation_offsets_xy: tuple[tuple[float, float], ...] = (
@@ -252,12 +253,20 @@ class DroneSwarmNavigationEnvCfg(DirectMARLEnvCfg):
     cluster_entry_radius: float = 1.8
     cluster_success_radius: float = 0.8
     agent_entry_radius: float = 2.4
-    agent_goal_radius: float = 1.3
+    agent_goal_radius: float = 1.1
     success_max_centroid_radius: float = 1.05
-    success_max_pairwise_distance: float = 1.90
+    success_max_pairwise_distance: float = 1.80
+    success_hold_steps: int = 12
     contact_force_threshold: float = 0.02
     contact_termination_force_threshold: float = 0.08
     contact_termination_steps: int = 3
+    severe_contact_force_threshold: float = 0.15
+    severe_contact_steps: int = 8
+    stuck_speed_threshold: float = 0.15
+    failure_height_threshold: float = 0.45
+    failure_height_steps: int = 8
+    upside_down_gravity_threshold: float = -0.2
+    upside_down_steps: int = 8
 
     guidance_progress_clamp: float = 0.3
     guidance_wrong_way_clamp: float = 0.2
@@ -267,17 +276,18 @@ class DroneSwarmNavigationEnvCfg(DirectMARLEnvCfg):
     reward_wrong_way_weight: float = 0.3
     reward_lateral_weight: float = 0.25
     reward_goal_soft_weight: float = 0.25
-    reward_goal_tight_weight: float = 1.5
-    reward_cluster_progress_weight: float = 0.15
-    reward_cluster_goal_bonus_weight: float = 1.25
+    reward_goal_tight_weight: float = 0.75
+    reward_cluster_progress_weight: float = 0.5
+    reward_cluster_goal_bonus_weight: float = 1.0
     reward_enter_target_region_weight: float = 2.0
-    reward_success_weight: float = 4.0
-    reward_close_weight: float = 0.8
-    reward_far_weight: float = 0.35
-    reward_pairwise_far_weight: float = 0.2
-    reward_collision_weight: float = 15.0
-    reward_contact_weight: float = 6.0
-    reward_termination_weight: float = 25.0
+    reward_target_compact_weight: float = 0.8
+    reward_success_weight: float = 10.0
+    reward_close_weight: float = 1.25
+    reward_far_weight: float = 0.6
+    reward_pairwise_far_weight: float = 0.6
+    reward_collision_weight: float = 1.5
+    reward_contact_weight: float = 1.5
+    reward_termination_weight: float = 4.0
     reward_overspeed_weight: float = 0.15
     reward_action_rate_weight: float = 0.05
 

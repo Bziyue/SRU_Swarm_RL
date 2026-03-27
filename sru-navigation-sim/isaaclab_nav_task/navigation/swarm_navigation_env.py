@@ -61,6 +61,9 @@ class DroneSwarmNavigationEnv(DirectMARLEnv):
         self.region_safe_points = [
             torch.as_tensor(region["safe_points"], dtype=torch.float32, device=self.device) for region in region_point_sets
         ]
+        self.region_goal_anchors = [
+            torch.as_tensor(region["goal_anchor"], dtype=torch.float32, device=self.device) for region in region_point_sets
+        ]
         (
             guidance_paths_xy,
             guidance_arc_lengths,
@@ -111,6 +114,7 @@ class DroneSwarmNavigationEnv(DirectMARLEnv):
         self.cluster_max_pairwise_distance = torch.zeros((self.num_envs,), dtype=torch.float32, device=self.device)
         self.cluster_target_region_reached = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
         self.cluster_target_region_bonus_awarded = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
+        self.cluster_success_hold_steps_buf = torch.zeros((self.num_envs,), dtype=torch.long, device=self.device)
         self.cluster_guidance_progress = torch.zeros((self.num_envs,), dtype=torch.float32, device=self.device)
         self.cluster_prev_guidance_progress = torch.zeros((self.num_envs,), dtype=torch.float32, device=self.device)
         self.cluster_guidance_lateral_error = torch.zeros((self.num_envs,), dtype=torch.float32, device=self.device)
@@ -131,6 +135,15 @@ class DroneSwarmNavigationEnv(DirectMARLEnv):
             agent: torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device) for agent in self.agent_ids
         }
         self.agent_contact_termination_streak = {
+            agent: torch.zeros((self.num_envs,), dtype=torch.long, device=self.device) for agent in self.agent_ids
+        }
+        self.agent_severe_contact_streak = {
+            agent: torch.zeros((self.num_envs,), dtype=torch.long, device=self.device) for agent in self.agent_ids
+        }
+        self.agent_height_failure_streak = {
+            agent: torch.zeros((self.num_envs,), dtype=torch.long, device=self.device) for agent in self.agent_ids
+        }
+        self.agent_attitude_failure_streak = {
             agent: torch.zeros((self.num_envs,), dtype=torch.long, device=self.device) for agent in self.agent_ids
         }
         self._guidance_progress_metric_step = -1
@@ -401,8 +414,10 @@ class DroneSwarmNavigationEnv(DirectMARLEnv):
             cluster_progress_reward = (
                 cluster_progress_delta / max(self.cfg.guidance_progress_clamp, 1e-6)
             ) * cluster_compactness_gate
+            target_compact_bonus = self.cluster_target_region_reached.float() * cluster_compactness_gate
         else:
             cluster_compactness_gate = torch.zeros((self.num_envs,), dtype=torch.float32, device=self.device)
+            target_compact_bonus = torch.zeros((self.num_envs,), dtype=torch.float32, device=self.device)
         for agent_idx, agent in enumerate(self.agent_ids):
             progress_delta = torch.clamp(
                 self.agent_guidance_progress[agent] - self.agent_prev_guidance_progress[agent],
@@ -460,13 +475,13 @@ class DroneSwarmNavigationEnv(DirectMARLEnv):
             speed_xy = torch.linalg.norm(self.robots[agent].data.root_lin_vel_w[:, :2], dim=1)
             overspeed_penalty = torch.clamp((speed_xy - self.cfg.max_speed) / self.cfg.max_speed, min=0.0)
             action_rate_penalty = torch.sum(torch.abs(self.actions[agent] - self._previous_actions[agent]), dim=1)
-            termination_penalty = self.cluster_contact.float()
+            termination_penalty = (self.cluster_contact.float() + self.cluster_fall.float()).clamp(max=1.0)
             if use_swarm_terms and collision_termination_enabled:
-                termination_penalty = (self.cluster_collision.float() + self.cluster_contact.float()).clamp(max=1.0)
+                termination_penalty = (termination_penalty + self.cluster_collision.float()).clamp(max=1.0)
 
             collision_event_penalty = collision_penalty
             if use_swarm_terms and collision_termination_enabled:
-                collision_event_penalty = self.cluster_collision.float()
+                collision_event_penalty = torch.maximum(collision_penalty, self.cluster_collision.float())
 
             rewards[agent] = (
                 self.cfg.reward_progress_weight * progress_reward
@@ -477,6 +492,7 @@ class DroneSwarmNavigationEnv(DirectMARLEnv):
                 + self.cfg.reward_cluster_progress_weight * cluster_progress_reward
                 + self.cfg.reward_cluster_goal_bonus_weight * cluster_goal_bonus
                 + self.cfg.reward_enter_target_region_weight * (enter_target_region_bonus.float() if use_swarm_terms else torch.zeros_like(goal_distance))
+                + self.cfg.reward_target_compact_weight * target_compact_bonus
                 + self.cfg.reward_success_weight * (self.cluster_success.float() if use_swarm_terms else torch.zeros_like(goal_distance))
                 - swarm_penalty_scale * self.cfg.reward_close_weight * close_penalty
                 - swarm_penalty_scale * self.cfg.reward_far_weight * far_penalty
@@ -493,7 +509,7 @@ class DroneSwarmNavigationEnv(DirectMARLEnv):
     def _get_dones(self) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
         self._update_common_buffers()
         time_out = self.episode_length_buf >= self.max_episode_length
-        terminated_common = self.cluster_success | self.cluster_contact
+        terminated_common = self.cluster_success | self.cluster_contact | self.cluster_fall
         if self._is_cluster_collision_termination_enabled():
             terminated_common = terminated_common | self.cluster_collision
         terminal_mask = terminated_common | time_out
@@ -550,6 +566,7 @@ class DroneSwarmNavigationEnv(DirectMARLEnv):
         self.cluster_max_pairwise_distance[env_ids] = 0.0
         self.cluster_target_region_reached[env_ids] = False
         self.cluster_target_region_bonus_awarded[env_ids] = False
+        self.cluster_success_hold_steps_buf[env_ids] = 0
 
         for agent_idx, agent in enumerate(self.agent_ids):
             robot = self.robots[agent]
@@ -577,6 +594,9 @@ class DroneSwarmNavigationEnv(DirectMARLEnv):
             )
             self.agent_contact_penalty_active[agent][env_ids] = False
             self.agent_contact_termination_streak[agent][env_ids] = 0
+            self.agent_severe_contact_streak[agent][env_ids] = 0
+            self.agent_height_failure_streak[agent][env_ids] = 0
+            self.agent_attitude_failure_streak[agent][env_ids] = 0
 
     def _update_common_buffers(self) -> None:
         positions = torch.stack([self.robots[agent].data.root_pos_w for agent in self.agent_ids], dim=1)
@@ -613,13 +633,31 @@ class DroneSwarmNavigationEnv(DirectMARLEnv):
 
             contact_force = self._compute_contact_force(agent)
             self.agent_contact_penalty_active[agent] = contact_force > self.cfg.contact_force_threshold
-            termination_contact_active = contact_force > self.cfg.contact_termination_force_threshold
-            self.agent_contact_termination_streak[agent] = torch.where(
-                termination_contact_active,
-                self.agent_contact_termination_streak[agent] + 1,
-                torch.zeros_like(self.agent_contact_termination_streak[agent]),
+            speed_xy = torch.linalg.norm(robot.data.root_lin_vel_w[:, :2], dim=1)
+            severe_contact_active = (contact_force > self.cfg.severe_contact_force_threshold) & (
+                speed_xy < self.cfg.stuck_speed_threshold
             )
-            self.cluster_contact |= self.agent_contact_termination_streak[agent] >= self.cfg.contact_termination_steps
+            self.agent_severe_contact_streak[agent] = torch.where(
+                severe_contact_active,
+                self.agent_severe_contact_streak[agent] + 1,
+                torch.zeros_like(self.agent_severe_contact_streak[agent]),
+            )
+            self.cluster_contact |= self.agent_severe_contact_streak[agent] >= self.cfg.severe_contact_steps
+
+            height_failure_active = torch.abs(robot.data.root_pos_w[:, 2] - self.cfg.flight_height) > self.cfg.failure_height_threshold
+            self.agent_height_failure_streak[agent] = torch.where(
+                height_failure_active,
+                self.agent_height_failure_streak[agent] + 1,
+                torch.zeros_like(self.agent_height_failure_streak[agent]),
+            )
+            attitude_failure_active = robot.data.projected_gravity_b[:, 2] > self.cfg.upside_down_gravity_threshold
+            self.agent_attitude_failure_streak[agent] = torch.where(
+                attitude_failure_active,
+                self.agent_attitude_failure_streak[agent] + 1,
+                torch.zeros_like(self.agent_attitude_failure_streak[agent]),
+            )
+            self.cluster_fall |= self.agent_height_failure_streak[agent] >= self.cfg.failure_height_steps
+            self.cluster_fall |= self.agent_attitude_failure_streak[agent] >= self.cfg.upside_down_steps
             agent_goal_distances.append(self.agent_goal_distance[agent])
 
         stacked_goal_distances = torch.stack(agent_goal_distances, dim=1)
@@ -635,7 +673,13 @@ class DroneSwarmNavigationEnv(DirectMARLEnv):
             success_compact = (self.cluster_max_centroid_radius < self.cfg.success_max_centroid_radius) & (
                 self.cluster_max_pairwise_distance < self.cfg.success_max_pairwise_distance
             )
-        self.cluster_success = success_goal & success_compact
+        success_instant = success_goal & success_compact
+        self.cluster_success_hold_steps_buf = torch.where(
+            success_instant,
+            self.cluster_success_hold_steps_buf + 1,
+            torch.zeros_like(self.cluster_success_hold_steps_buf),
+        )
+        self.cluster_success = self.cluster_success_hold_steps_buf >= self.cfg.success_hold_steps
 
         pairwise_gate_denom = max(
             float(self.cfg.max_pairwise_separation - self.cfg.success_max_pairwise_distance),
@@ -714,6 +758,7 @@ class DroneSwarmNavigationEnv(DirectMARLEnv):
         else:
             terminal_collision_caused = torch.zeros_like(self.cluster_collision, dtype=torch.bool)
         terminal_contact = self.cluster_contact & terminal_mask
+        terminal_fall = self.cluster_fall & terminal_mask
         terminal_timeout = time_out & terminal_mask
         terminal_target_region = self.cluster_target_region_reached & terminal_mask
         terminal_count = terminal_mask.sum()
@@ -739,6 +784,7 @@ class DroneSwarmNavigationEnv(DirectMARLEnv):
             # Backward-compatible alias: this now means collision-caused terminations.
             "terminal_collision_rate": terminal_collision_caused.float().sum() / terminal_count.float(),
             "terminal_contact_rate": terminal_contact.float().sum() / terminal_count.float(),
+            "terminal_fall_rate": terminal_fall.float().sum() / terminal_count.float(),
             "terminal_target_region_rate": terminal_target_region.float().sum() / terminal_count.float(),
             "terminal_timeout_rate": terminal_timeout.float().sum() / terminal_count.float(),
             "terminal_goal_distance": masked_mean(self.cluster_goal_distance),
@@ -751,6 +797,7 @@ class DroneSwarmNavigationEnv(DirectMARLEnv):
     def _sample_spawn_and_goal(
         self, env_ids: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        goal_sampling_mode = str(getattr(self.cfg, "goal_sampling_mode", "region_center_anchor")).strip().lower()
         sampled_indices = torch.zeros((len(env_ids),), dtype=torch.long, device=self.device)
         source_region_ids = torch.zeros((len(env_ids),), dtype=torch.long, device=self.device)
         target_region_ids = torch.zeros((len(env_ids),), dtype=torch.long, device=self.device)
@@ -776,8 +823,15 @@ class DroneSwarmNavigationEnv(DirectMARLEnv):
                     continue
 
                 cluster_points, center_point = cluster_sample
-                goal_idx = torch.randint(0, len(goal_region_points), (1,), device=self.device).item()
-                goal_centers[local_idx] = goal_region_points[goal_idx]
+                if goal_sampling_mode == "random_safe_point":
+                    goal_idx = torch.randint(0, len(goal_region_points), (1,), device=self.device).item()
+                    goal_centers[local_idx] = goal_region_points[goal_idx]
+                elif goal_sampling_mode == "region_center_anchor":
+                    goal_centers[local_idx] = self.region_goal_anchors[target_region_id]
+                else:
+                    raise ValueError(
+                        "goal_sampling_mode must be one of {'random_safe_point', 'region_center_anchor'}"
+                    )
                 spawn_positions[local_idx] = cluster_points
                 spawn_centers[local_idx] = center_point
                 sampled_indices[local_idx] = pair_idx
