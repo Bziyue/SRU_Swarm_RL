@@ -232,23 +232,13 @@ class DroneSwarmNavigationEnv(DirectMARLEnv):
         if self.cfg.disable_teammate_observations:
             return 0.0
 
-        return self._compute_curriculum_scale(
-            scale_min=float(self.cfg.teammate_obs_scale_min),
-            scale_max=float(self.cfg.teammate_obs_scale_max),
-            warmup_iters=int(self.cfg.teammate_obs_scale_warmup_iters),
-            ramp_iters=int(self.cfg.teammate_obs_scale_ramp_iters),
-        )
+        return 1.0
 
     def _get_swarm_penalty_scale(self) -> float:
         if self.cfg.solo_pretraining:
             return 0.0
 
-        return self._compute_curriculum_scale(
-            scale_min=float(self.cfg.swarm_penalty_scale_min),
-            scale_max=float(self.cfg.swarm_penalty_scale_max),
-            warmup_iters=int(self.cfg.swarm_penalty_scale_warmup_iters),
-            ramp_iters=int(self.cfg.swarm_penalty_scale_ramp_iters),
-        )
+        return 1.0
 
     def _is_cluster_collision_termination_enabled(self) -> bool:
         if not self.cfg.enable_cluster_collision_termination or self.cfg.solo_pretraining:

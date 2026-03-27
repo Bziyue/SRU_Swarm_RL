@@ -216,14 +216,14 @@ class DroneSwarmNavigationEnvCfg(DirectMARLEnvCfg):
     teammate_observation_radius: float = 6.0
     disable_teammate_observations: bool = False
     solo_pretraining: bool = False
-    teammate_obs_scale_min: float = 0.05
+    teammate_obs_scale_min: float = 1.0
     teammate_obs_scale_max: float = 1.0
-    teammate_obs_scale_warmup_iters: int = 100
-    teammate_obs_scale_ramp_iters: int = 1000
-    swarm_penalty_scale_min: float = 0.25
+    teammate_obs_scale_warmup_iters: int = 0
+    teammate_obs_scale_ramp_iters: int = 0
+    swarm_penalty_scale_min: float = 1.0
     swarm_penalty_scale_max: float = 1.0
-    swarm_penalty_scale_warmup_iters: int = 150
-    swarm_penalty_scale_ramp_iters: int = 1200
+    swarm_penalty_scale_warmup_iters: int = 0
+    swarm_penalty_scale_ramp_iters: int = 0
     enable_cluster_collision_termination: bool = False
     cluster_collision_termination_mode: str = "always_off"
     cluster_collision_termination_warmup_iters: int = 1200
@@ -240,7 +240,7 @@ class DroneSwarmNavigationEnvCfg(DirectMARLEnvCfg):
     spawn_candidate_pool: int = 64
     spawn_assignment_radius: float = 0.50
     min_spawn_separation: float = 0.45
-    min_separation: float = 0.65
+    min_separation: float = 0.50
     collision_distance: float = 0.32
     max_cohesion_radius: float = 1.80
     fallback_cluster_radius: float = 1.80
@@ -338,10 +338,6 @@ class DroneSwarmNavigationEnvCfg_DEV(DroneSwarmNavigationEnvCfg):
     def __post_init__(self):
         super().__post_init__()
         self.scene.num_envs = 32
-        self.teammate_obs_scale_warmup_iters = 10
-        self.teammate_obs_scale_ramp_iters = 80
-        self.swarm_penalty_scale_warmup_iters = 10
-        self.swarm_penalty_scale_ramp_iters = 80
         self.cluster_collision_termination_warmup_iters = 20
 
 
