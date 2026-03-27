@@ -56,6 +56,21 @@ class RslRlPpoActorCriticCfg:
     height_input_dims: tuple[int, int, int] = (64, 7, 7)
     """Encoded height scan feature shape as (C, H, W). Default is (64, 7, 7) for 64*7*7=3136 features."""
 
+    ego_input_dim: Optional[int] = None
+    """Flat ego-observation dimension before any teammate slots are appended."""
+
+    teammate_feature_dim: int = 0
+    """Feature dimension for one teammate slot. Set to 0 to disable teammate attention."""
+
+    max_teammates: int = 0
+    """Maximum number of teammate slots expected in the flat observation."""
+
+    teammate_embed_dim: int = 64
+    """Hidden size used to embed ego and teammate features for relational attention."""
+
+    teammate_attention_heads: int = 4
+    """Number of attention heads used by the teammate relational encoder."""
+
 
 @configclass
 class RslRlPpoAlgorithmCfg:

@@ -148,7 +148,7 @@ pip install -e .
 
 ## 补充文档
 
-- [DRONE_TRAINING_DEFAULTS.md](DRONE_TRAINING_DEFAULTS.md) - 无人机训练默认动力学、控制器使用、噪声与强化学习参数
+- [DRONE_TRAINING_DEFAULTS.md](DRONE_TRAINING_DEFAULTS.md) - 无人机训练默认动力学、控制器使用、噪声、强化学习参数与当前 swarm / SwarmCompat 策略网络结构图
 - [TERRAIN_AND_GOALS.md](TERRAIN_AND_GOALS.md) - 地形生成、目标采样与坐标系相关说明
 
 ## 训练

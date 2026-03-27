@@ -9,18 +9,18 @@ from isaaclab_nav_task.navigation.config.rl_cfg import (
 )
 
 
-@configclass
-class DroneStaticNavPPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    # Keep a ~3.2 s rollout horizon after moving to 10 Hz control.
-    num_steps_per_env = 32
-    max_iterations = 15000
-    save_interval = 500
-    logger = "tensorboard"
-    seed = 60
-    experiment_name = "drone_static_navigation_ppo"
-    empirical_normalization = False
-    reward_shifting_value = 0.05
-    policy = RslRlPpoActorCriticCfg(
+def _make_drone_policy_cfg(*, use_teammate_attention: bool = False) -> RslRlPpoActorCriticCfg:
+    extra_kwargs = {}
+    if use_teammate_attention:
+        extra_kwargs = {
+            "ego_input_dim": 16,
+            "teammate_feature_dim": 4,
+            "max_teammates": 4,
+            "teammate_embed_dim": 64,
+            "teammate_attention_heads": 4,
+        }
+
+    return RslRlPpoActorCriticCfg(
         class_name="ActorCriticSRU",
         # Lower the initial exploration noise to reduce early instability after
         # moving the high-level controller to 10 Hz with execution delay/lag.
@@ -35,7 +35,22 @@ class DroneStaticNavPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         num_cameras=1,
         image_input_dims=(64, 5, 8),
         height_input_dims=(64, 7, 7),
+        **extra_kwargs,
     )
+
+
+@configclass
+class DroneStaticNavPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+    # Keep a ~3.2 s rollout horizon after moving to 10 Hz control.
+    num_steps_per_env = 32
+    max_iterations = 15000
+    save_interval = 500
+    logger = "tensorboard"
+    seed = 60
+    experiment_name = "drone_static_navigation_ppo"
+    empirical_normalization = False
+    reward_shifting_value = 0.05
+    policy = _make_drone_policy_cfg(use_teammate_attention=False)
     algorithm = RslRlPpoAlgorithmCfg(
         class_name="PPO",
         value_loss_coef=0.02,
@@ -71,6 +86,7 @@ class DroneStaticNavPPORunnerDevCfg(DroneStaticNavPPORunnerCfg):
 @configclass
 class DroneStaticNavPPOCompatRunnerCfg(DroneStaticNavPPORunnerCfg):
     experiment_name = "drone_static_navigation_ppo_swarm_compat"
+    policy = _make_drone_policy_cfg(use_teammate_attention=True)
 
 
 @configclass

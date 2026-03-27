@@ -9,17 +9,8 @@ from isaaclab_nav_task.navigation.config.rl_cfg import (
 )
 
 
-@configclass
-class DroneSwarmNavIPPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    num_steps_per_env = 16
-    max_iterations = 15000
-    save_interval = 500
-    logger = "tensorboard"
-    seed = 60
-    experiment_name = "drone_swarm_navigation_ippo"
-    empirical_normalization = False
-    reward_shifting_value = 0.05
-    policy = RslRlPpoActorCriticCfg(
+def _make_swarm_policy_cfg() -> RslRlPpoActorCriticCfg:
+    return RslRlPpoActorCriticCfg(
         class_name="ActorCriticSRU",
         init_noise_std=1.0,
         actor_hidden_dims=[512, 256, 128],
@@ -32,7 +23,25 @@ class DroneSwarmNavIPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         num_cameras=1,
         image_input_dims=(64, 5, 8),
         height_input_dims=(64, 7, 7),
+        ego_input_dim=16,
+        teammate_feature_dim=4,
+        max_teammates=4,
+        teammate_embed_dim=64,
+        teammate_attention_heads=4,
     )
+
+
+@configclass
+class DroneSwarmNavIPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+    num_steps_per_env = 16
+    max_iterations = 15000
+    save_interval = 500
+    logger = "tensorboard"
+    seed = 60
+    experiment_name = "drone_swarm_navigation_ippo"
+    empirical_normalization = False
+    reward_shifting_value = 0.05
+    policy = _make_swarm_policy_cfg()
     algorithm = RslRlPpoAlgorithmCfg(
         class_name="PPO",
         value_loss_coef=0.02,

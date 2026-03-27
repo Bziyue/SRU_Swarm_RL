@@ -184,21 +184,15 @@ class DroneSwarmNavigationEnv(DirectMARLEnv):
             robot.write_root_velocity_to_sim(root_velocity)
 
     def _encode_teammate_features(
-        self, rel_pos_b: torch.Tensor, rel_vel_b: torch.Tensor, rel_dist: torch.Tensor, visible: torch.Tensor
+        self, rel_pos_b: torch.Tensor, rel_dist: torch.Tensor, visible: torch.Tensor
     ) -> torch.Tensor:
-        """Normalize teammate features into a bounded range before feeding the policy."""
-        pos_scale = max(float(self.cfg.teammate_observation_radius), 1e-6)
-        vel_scale = max(float(self.cfg.max_speed) * 2.0, 1e-6)
-        dist_scale = pos_scale
-
-        rel_pos_norm = torch.clamp(rel_pos_b / pos_scale, min=-1.0, max=1.0)
-        rel_vel_norm = torch.clamp(rel_vel_b / vel_scale, min=-1.0, max=1.0)
-        rel_dist_norm = torch.clamp(rel_dist / dist_scale, min=0.0, max=1.0)
-
-        return torch.cat(
-            (rel_pos_norm * visible, rel_vel_norm * visible, rel_dist_norm * visible, visible),
-            dim=1,
-        )
+        """Encode teammates as direction, intensity, and visibility."""
+        dist_scale = max(float(self.cfg.teammate_observation_radius), 1e-6)
+        safe_dist = torch.clamp(rel_dist, min=1e-6)
+        rel_dir = rel_pos_b / safe_dist
+        rel_dir = torch.where(visible > 0.0, rel_dir, torch.zeros_like(rel_dir))
+        intensity = torch.clamp(1.0 - rel_dist / dist_scale, min=0.0, max=1.0) * visible
+        return torch.cat((rel_dir, intensity, visible), dim=1)
 
     def set_training_iteration(self, iteration: int) -> None:
         self.current_training_iteration = max(int(iteration), 0)
@@ -303,19 +297,16 @@ class DroneSwarmNavigationEnv(DirectMARLEnv):
             teammate_features = []
             teammate_sort_keys = []
             own_pos = robot.data.root_pos_w
-            own_vel = robot.data.root_lin_vel_w
             own_yaw_quat = yaw_quat(robot.data.root_quat_w)
             for other_idx, other_agent in enumerate(self.agent_ids):
                 if other_idx == agent_idx:
                     continue
                 other_robot = self.robots[other_agent]
                 rel_pos_w = other_robot.data.root_pos_w - own_pos
-                rel_vel_w = other_robot.data.root_lin_vel_w - own_vel
                 rel_pos_b = quat_apply_inverse(own_yaw_quat, rel_pos_w)[:, :2]
-                rel_vel_b = quat_apply_inverse(own_yaw_quat, rel_vel_w)[:, :2]
                 rel_dist = torch.linalg.norm(rel_pos_w[:, :2], dim=1, keepdim=True)
                 visible = (rel_dist <= self.cfg.teammate_observation_radius).float()
-                teammate_features.append(self._encode_teammate_features(rel_pos_b, rel_vel_b, rel_dist, visible))
+                teammate_features.append(self._encode_teammate_features(rel_pos_b, rel_dist, visible))
                 teammate_sort_keys.append(rel_dist.squeeze(1))
 
             teammate_feature_stack = torch.stack(teammate_features, dim=1)

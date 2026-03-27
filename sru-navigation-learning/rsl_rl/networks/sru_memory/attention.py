@@ -18,6 +18,7 @@ except ImportError:  # pragma: no cover - older torch fallback
     sdpa_kernel = None
 
 
+@torch.jit.unused
 def _sdpa_math_context():
     if SDPBackend is None or sdpa_kernel is None:
         return nullcontext()
@@ -187,8 +188,11 @@ class CrossAttentionFuseModule(nn.Module):
 
         # 5. self-attention (pre-norm + residual)
         x_norm = self.norm1(x)
-        with _sdpa_math_context():
+        if torch.jit.is_scripting():
             sa, _ = self.self_attn(x_norm, x_norm, x_norm, key_padding_mask=key_mask, need_weights=False)
+        else:
+            with _sdpa_math_context():
+                sa, _ = self.self_attn(x_norm, x_norm, x_norm, key_padding_mask=key_mask, need_weights=False)
         x = x + sa
 
         # 6. feed-forward (pre-norm + residual)
@@ -196,7 +200,10 @@ class CrossAttentionFuseModule(nn.Module):
 
         # 7. cross-attention with info query
         q = self.info_proj(info).unsqueeze(1)  # (B,1,C)
-        with _sdpa_math_context():
+        if torch.jit.is_scripting():
             ca, _ = self.cross_attn(q, x, x, key_padding_mask=key_mask, need_weights=False)
+        else:
+            with _sdpa_math_context():
+                ca, _ = self.cross_attn(q, x, x, key_padding_mask=key_mask, need_weights=False)
 
         return ca.squeeze(1)  # (B, C)

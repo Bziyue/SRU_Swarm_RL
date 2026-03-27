@@ -63,6 +63,11 @@ class ActorCriticSRU(nn.Module):
         rnn_num_layers: int = 1,
         time_embed_dim: int = 8,
         num_cameras: int = 1,
+        ego_input_dim: Optional[int] = None,
+        teammate_feature_dim: int = 0,
+        max_teammates: int = 0,
+        teammate_embed_dim: int = 64,
+        teammate_attention_heads: int = 4,
         **kwargs,
     ):
         if kwargs:
@@ -87,6 +92,9 @@ class ActorCriticSRU(nn.Module):
 
         self.num_actor_obs = num_actor_obs
         self.num_critic_obs = num_critic_obs
+        self.ego_input_dim = ego_input_dim
+        self.teammate_feature_dim = teammate_feature_dim
+        self.max_teammates = max_teammates
 
         # For actor: proprioceptive data + image data
         # For critic: proprioceptive data + height data + image data + time data
@@ -99,29 +107,65 @@ class ActorCriticSRU(nn.Module):
             "Actor and Critic proprioceptive input dims must match"
         )
 
-        # MLP input dimensions (after attention: image_features + proprioceptive)
-        self.mlp_input_dim_actor = self.actor_proprioceptive_input_dim + image_input_dims[0]
-        self.mlp_input_dim_critic = (
-            self.critic_proprioceptive_input_dim + height_input_dims[0] + image_input_dims[0]
+        self.use_teammate_attention = (
+            self.ego_input_dim is not None and self.teammate_feature_dim > 0 and self.max_teammates > 0
         )
+
+        if self.use_teammate_attention:
+            expected_teammate_dim = self.teammate_feature_dim * self.max_teammates
+            expected_proprio_dim = self.ego_input_dim + expected_teammate_dim
+            assert self.actor_proprioceptive_input_dim == expected_proprio_dim, (
+                f"Actor proprio dim {self.actor_proprioceptive_input_dim} does not match "
+                f"ego_input_dim + teammate dims ({expected_proprio_dim})"
+            )
+            assert self.critic_proprioceptive_input_dim == expected_proprio_dim, (
+                f"Critic proprio dim {self.critic_proprioceptive_input_dim} does not match "
+                f"ego_input_dim + teammate dims ({expected_proprio_dim})"
+            )
+            self.actor_relational_encoder = EgoTeammateContextEncoder(
+                ego_input_dim=self.ego_input_dim,
+                teammate_feature_dim=self.teammate_feature_dim,
+                max_teammates=self.max_teammates,
+                embed_dim=teammate_embed_dim,
+                num_heads=teammate_attention_heads,
+                activation_name=activation,
+            )
+            self.critic_relational_encoder = EgoTeammateContextEncoder(
+                ego_input_dim=self.ego_input_dim,
+                teammate_feature_dim=self.teammate_feature_dim,
+                max_teammates=self.max_teammates,
+                embed_dim=teammate_embed_dim,
+                num_heads=teammate_attention_heads,
+                activation_name=activation,
+            )
+        else:
+            self.actor_relational_encoder = IdentityContextEncoder(self.actor_proprioceptive_input_dim)
+            self.critic_relational_encoder = IdentityContextEncoder(self.critic_proprioceptive_input_dim)
+
+        self.actor_context_dim = self.actor_relational_encoder.output_dim
+        self.critic_context_dim = self.critic_relational_encoder.output_dim
+
+        # MLP input dimensions (after attention: image/height features + context)
+        self.mlp_input_dim_actor = self.actor_context_dim + image_input_dims[0]
+        self.mlp_input_dim_critic = self.critic_context_dim + height_input_dims[0] + image_input_dims[0]
 
         # Attention modules (applied in batch, outside RNN loop)
         # spatial_dims = (D, H, W) where D=num_cameras for image, D=1 for height
         self.attn_image_net = CrossAttentionFuseModule(
             image_dim=image_input_dims[0],
-            info_dim=self.actor_proprioceptive_input_dim,
+            info_dim=self.actor_context_dim,
             num_heads=4,
             spatial_dims=(num_cameras, image_input_dims[1], image_input_dims[2]),
         )
         self.attn_height_net = CrossAttentionFuseModule(
             image_dim=height_input_dims[0],
-            info_dim=self.critic_proprioceptive_input_dim,
+            info_dim=self.critic_context_dim,
             num_heads=4,
             spatial_dims=(1, height_input_dims[1], height_input_dims[2]),
         )
         self.attn_critic_image_net = CrossAttentionFuseModule(
             image_dim=image_input_dims[0],
-            info_dim=self.critic_proprioceptive_input_dim,
+            info_dim=self.critic_context_dim,
             num_heads=4,
             spatial_dims=(num_cameras, image_input_dims[1], image_input_dims[2]),
         )
@@ -172,6 +216,7 @@ class ActorCriticSRU(nn.Module):
         print(f"[ActorCriticSRU] Actor RNN: {self.memory_a}")
         print(f"[ActorCriticSRU] Critic RNN: {self.memory_c}")
         print(f"[ActorCriticSRU] Num cameras: {self.num_cameras}")
+        print(f"[ActorCriticSRU] Teammate attention enabled: {self.use_teammate_attention}")
         # Action noise: using log_std parameter
         self.log_std = nn.Parameter(torch.log(init_noise_std * torch.ones(num_actions)))
         self.distribution = None
@@ -179,7 +224,8 @@ class ActorCriticSRU(nn.Module):
 
     def get_actor_parameters(self):
         return (
-            list(self.attn_image_net.parameters())
+            list(self.actor_relational_encoder.parameters())
+            + list(self.attn_image_net.parameters())
             + list(self.linear_dropout_actor.parameters())
             + list(self.actor.parameters())
             + list(self.memory_a.parameters())
@@ -188,7 +234,8 @@ class ActorCriticSRU(nn.Module):
 
     def get_critic_parameters(self):
         return (
-            list(self.attn_height_net.parameters())
+            list(self.critic_relational_encoder.parameters())
+            + list(self.attn_height_net.parameters())
             + list(self.attn_critic_image_net.parameters())
             + list(self.linear_dropout_critic.parameters())
             + list(self.time_layer.parameters())
@@ -246,6 +293,12 @@ class ActorCriticSRU(nn.Module):
         else:
             raise ValueError(f"Unsupported num_cameras: {self.num_cameras}")
 
+    def _build_actor_context(self, other_obs: torch.Tensor) -> torch.Tensor:
+        return self.actor_relational_encoder(other_obs)
+
+    def _build_critic_context(self, other_obs: torch.Tensor) -> torch.Tensor:
+        return self.critic_relational_encoder(other_obs)
+
     def process_actor_input(self, observations: torch.Tensor, masks, hidden_states) -> torch.Tensor:
         """Process actor observations through attention and RNN.
 
@@ -266,6 +319,7 @@ class ActorCriticSRU(nn.Module):
         other_obs = observations[..., : -self.num_image_features * self.num_cameras]
         image_list = self._extract_image_observations(observations)
         other_obs = other_obs.reshape(-1, self.actor_proprioceptive_input_dim)
+        actor_context = self._build_actor_context(other_obs)
 
         # Stack images if multiple cameras, otherwise use single image
         if self.num_cameras == 2:
@@ -274,16 +328,16 @@ class ActorCriticSRU(nn.Module):
             image_input = image_list[0]  # Single tensor
 
         # Batched attention (process all timesteps at once)
-        image_features = self.attn_image_net(image_input, other_obs)
+        image_features = self.attn_image_net(image_input, actor_context)
 
         # Reshape for batch mode
         if batch_mode:
             seq_len, batch_size, _ = observations.size()
             image_features = image_features.view(seq_len, batch_size, -1)
-            other_obs = other_obs.view(seq_len, batch_size, -1)
+            actor_context = actor_context.view(seq_len, batch_size, -1)
 
-        # Concatenate image features with proprioceptive observations
-        combined_features = torch.cat([image_features, other_obs], dim=-1)
+        # Concatenate image features with ego/team context
+        combined_features = torch.cat([image_features, actor_context], dim=-1)
 
         # RNN processing
         combined_features = self.memory_a(combined_features, masks, hidden_states)
@@ -319,6 +373,7 @@ class ActorCriticSRU(nn.Module):
         # Reshape tensors
         other_obs = other_obs.reshape(-1, self.critic_proprioceptive_input_dim)
         height_obs = height_obs.reshape(-1, *self.height_input_dims)
+        critic_context = self._build_critic_context(other_obs)
 
         # Stack images if multiple cameras, otherwise use single image
         if self.num_cameras == 2:
@@ -327,21 +382,21 @@ class ActorCriticSRU(nn.Module):
             image_input = image_list[0]  # Single tensor
 
         # Batched attention (process all timesteps at once)
-        height_features = self.attn_height_net(height_obs, other_obs)
-        image_features = self.attn_critic_image_net(image_input, other_obs)
+        height_features = self.attn_height_net(height_obs, critic_context)
+        image_features = self.attn_critic_image_net(image_input, critic_context)
 
         # Reshape for batch mode
         if batch_mode:
             seq_len, batch_size, _ = observations.size()
             height_features = height_features.view(seq_len, batch_size, -1)
             image_features = image_features.view(seq_len, batch_size, -1)
-            other_obs = other_obs.view(seq_len, batch_size, -1)
+            critic_context = critic_context.view(seq_len, batch_size, -1)
 
         # Time embedding for the critic
         time_embed = self.time_layer(time_obs)
 
-        # Concatenate height, image, and proprioceptive features
-        combined_features = torch.cat([height_features, image_features, other_obs], dim=-1)
+        # Concatenate height, image, and ego/team context features
+        combined_features = torch.cat([height_features, image_features, critic_context], dim=-1)
 
         # RNN processing
         combined_features = self.memory_c(combined_features, masks, hidden_states)
@@ -416,6 +471,7 @@ class ActorCriticSRU(nn.Module):
         if self.num_cameras == 2:
             exporter = _ActorCriticSRUExporterDualCam(
                 attn_image_net=self.attn_image_net,
+                actor_relational_encoder=self.actor_relational_encoder,
                 memory_a=self.memory_a,
                 linear_dropout_actor=self.linear_dropout_actor,
                 actor=self.actor,
@@ -427,6 +483,7 @@ class ActorCriticSRU(nn.Module):
         else:
             exporter = _ActorCriticSRUExporterSingleCam(
                 attn_image_net=self.attn_image_net,
+                actor_relational_encoder=self.actor_relational_encoder,
                 memory_a=self.memory_a,
                 linear_dropout_actor=self.linear_dropout_actor,
                 actor=self.actor,
@@ -479,6 +536,7 @@ class ActorCriticSRU(nn.Module):
         if self.num_cameras == 2:
             exporter = _ActorCriticSRUONNXExporterDualCam(
                 attn_image_net=self.attn_image_net,
+                actor_relational_encoder=self.actor_relational_encoder,
                 memory_a=self.memory_a,
                 linear_dropout_actor=self.linear_dropout_actor,
                 actor=self.actor,
@@ -490,6 +548,7 @@ class ActorCriticSRU(nn.Module):
         else:
             exporter = _ActorCriticSRUONNXExporterSingleCam(
                 attn_image_net=self.attn_image_net,
+                actor_relational_encoder=self.actor_relational_encoder,
                 memory_a=self.memory_a,
                 linear_dropout_actor=self.linear_dropout_actor,
                 actor=self.actor,
@@ -549,6 +608,7 @@ class _ActorCriticSRUExporterSingleCam(nn.Module):
     def __init__(
         self,
         attn_image_net,
+        actor_relational_encoder,
         memory_a,
         linear_dropout_actor,
         actor,
@@ -561,6 +621,7 @@ class _ActorCriticSRUExporterSingleCam(nn.Module):
         import copy
 
         self.attn_image_net = copy.deepcopy(attn_image_net)
+        self.actor_relational_encoder = copy.deepcopy(actor_relational_encoder)
         self.rnn = copy.deepcopy(memory_a.rnn)
         self.linear = copy.deepcopy(linear_dropout_actor.linear)
         self.activation = copy.deepcopy(linear_dropout_actor.activation)
@@ -595,16 +656,17 @@ class _ActorCriticSRUExporterSingleCam(nn.Module):
         # Split observations into proprioceptive and image parts
         other_obs = observations[..., :-self.num_image_features]
         other_obs = other_obs.reshape(-1, self.actor_proprioceptive_input_dim)
+        actor_context = self.actor_relational_encoder(other_obs)
 
         # Extract and reshape single camera image
         image_obs = observations[..., -self.num_image_features:]
         image_obs = image_obs.reshape(-1, self.image_c, self.image_h, self.image_w)
 
         # Attention processing
-        image_features = self.attn_image_net(image_obs, other_obs)
+        image_features = self.attn_image_net(image_obs, actor_context)
 
-        # Concatenate image features with proprioceptive observations
-        combined_features = torch.cat([image_features, other_obs], dim=-1)
+        # Concatenate image features with ego/team context
+        combined_features = torch.cat([image_features, actor_context], dim=-1)
 
         # RNN processing
         combined_features, (h, c) = self.rnn(
@@ -637,6 +699,7 @@ class _ActorCriticSRUExporterDualCam(nn.Module):
     def __init__(
         self,
         attn_image_net,
+        actor_relational_encoder,
         memory_a,
         linear_dropout_actor,
         actor,
@@ -649,6 +712,7 @@ class _ActorCriticSRUExporterDualCam(nn.Module):
         import copy
 
         self.attn_image_net = copy.deepcopy(attn_image_net)
+        self.actor_relational_encoder = copy.deepcopy(actor_relational_encoder)
         self.rnn = copy.deepcopy(memory_a.rnn)
         self.linear = copy.deepcopy(linear_dropout_actor.linear)
         self.activation = copy.deepcopy(linear_dropout_actor.activation)
@@ -683,6 +747,7 @@ class _ActorCriticSRUExporterDualCam(nn.Module):
         # Split observations into proprioceptive and image parts (2 cameras)
         other_obs = observations[..., :-self.num_image_features * 2]
         other_obs = other_obs.reshape(-1, self.actor_proprioceptive_input_dim)
+        actor_context = self.actor_relational_encoder(other_obs)
 
         # Extract and reshape dual camera images
         image_obs_front = observations[..., -self.num_image_features * 2: -self.num_image_features]
@@ -693,10 +758,10 @@ class _ActorCriticSRUExporterDualCam(nn.Module):
         ]
 
         # Attention processing
-        image_features = self.attn_image_net(image_list, other_obs)
+        image_features = self.attn_image_net(image_list, actor_context)
 
-        # Concatenate image features with proprioceptive observations
-        combined_features = torch.cat([image_features, other_obs], dim=-1)
+        # Concatenate image features with ego/team context
+        combined_features = torch.cat([image_features, actor_context], dim=-1)
 
         # RNN processing
         combined_features, (h, c) = self.rnn(
@@ -739,6 +804,81 @@ def get_activation(act_name: str) -> nn.Module:
         return nn.Sigmoid()
     else:
         raise ValueError(f"Invalid activation function: {act_name}")
+
+
+class IdentityContextEncoder(nn.Module):
+    """Pass-through encoder used when teammate attention is disabled."""
+
+    def __init__(self, input_dim: int):
+        super().__init__()
+        self.output_dim = input_dim
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x
+
+
+class EgoTeammateContextEncoder(nn.Module):
+    """Encode ego state and aggregate teammate observations with attention."""
+
+    def __init__(
+        self,
+        ego_input_dim: int,
+        teammate_feature_dim: int,
+        max_teammates: int,
+        embed_dim: int,
+        num_heads: int,
+        activation_name: str,
+    ):
+        super().__init__()
+        if embed_dim % num_heads != 0:
+            raise ValueError("teammate_embed_dim must be divisible by teammate_attention_heads")
+
+        self.ego_input_dim = ego_input_dim
+        self.teammate_feature_dim = teammate_feature_dim
+        self.max_teammates = max_teammates
+        self.embed_dim = embed_dim
+        self.output_dim = embed_dim * 2
+
+        self.ego_encoder = nn.Sequential(
+            nn.Linear(ego_input_dim, embed_dim),
+            get_activation(activation_name),
+            nn.Linear(embed_dim, embed_dim),
+            get_activation(activation_name),
+        )
+        self.teammate_encoder = nn.Sequential(
+            nn.Linear(teammate_feature_dim, embed_dim),
+            get_activation(activation_name),
+            nn.Linear(embed_dim, embed_dim),
+            get_activation(activation_name),
+        )
+        self.ego_query = nn.Linear(embed_dim, embed_dim)
+        self.attention = nn.MultiheadAttention(embed_dim=embed_dim, num_heads=num_heads, batch_first=True)
+
+    def forward(self, flat_obs: torch.Tensor) -> torch.Tensor:
+        ego_obs = flat_obs[..., : self.ego_input_dim]
+        teammate_obs = flat_obs[..., self.ego_input_dim :]
+        ego_emb = self.ego_encoder(ego_obs)
+
+        teammate_obs = teammate_obs.reshape(-1, self.max_teammates, self.teammate_feature_dim)
+        teammate_emb = self.teammate_encoder(teammate_obs.reshape(-1, self.teammate_feature_dim))
+        teammate_emb = teammate_emb.reshape(-1, self.max_teammates, self.embed_dim)
+
+        visible = teammate_obs[..., -1] > 0.0
+        key_padding_mask = ~visible
+        has_visible = visible.any(dim=1)
+
+        if not torch.all(has_visible):
+            missing = ~has_visible
+            teammate_emb = teammate_emb.clone()
+            key_padding_mask = key_padding_mask.clone()
+            teammate_emb[missing, 0, :] = 0.0
+            key_padding_mask[missing, 0] = False
+
+        query = self.ego_query(ego_emb).unsqueeze(1)
+        team_ctx, _ = self.attention(query, teammate_emb, teammate_emb, key_padding_mask=key_padding_mask, need_weights=False)
+        team_ctx = team_ctx.squeeze(1)
+        team_ctx = torch.where(has_visible.unsqueeze(-1), team_ctx, torch.zeros_like(team_ctx))
+        return torch.cat((ego_emb, team_ctx), dim=-1)
 
 
 class MemorySRU(torch.nn.Module):
@@ -873,6 +1013,7 @@ class _ActorCriticSRUONNXExporterSingleCam(nn.Module):
     def __init__(
         self,
         attn_image_net,
+        actor_relational_encoder,
         memory_a,
         linear_dropout_actor,
         actor,
@@ -885,6 +1026,7 @@ class _ActorCriticSRUONNXExporterSingleCam(nn.Module):
         import copy
 
         self.attn_image_net = copy.deepcopy(attn_image_net)
+        self.actor_relational_encoder = copy.deepcopy(actor_relational_encoder)
         self.rnn = copy.deepcopy(memory_a.rnn)
         self.linear = copy.deepcopy(linear_dropout_actor.linear)
         self.activation = copy.deepcopy(linear_dropout_actor.activation)
@@ -907,6 +1049,7 @@ class _ActorCriticSRUONNXExporterSingleCam(nn.Module):
         # Split observations into proprioceptive and image parts
         other_obs = observations[..., :-self.num_image_features]
         other_obs = other_obs.reshape(-1, self.actor_proprioceptive_input_dim)
+        actor_context = self.actor_relational_encoder(other_obs)
 
         # Extract and reshape single camera image, add depth dimension
         image_obs = observations[..., -self.num_image_features:]
@@ -914,10 +1057,10 @@ class _ActorCriticSRUONNXExporterSingleCam(nn.Module):
         image_obs = image_obs.unsqueeze(2)  # (B, C, 1, H, W)
 
         # Attention processing (positional encoding cached on first call)
-        image_features = self.attn_image_net(image_obs, other_obs)
+        image_features = self.attn_image_net(image_obs, actor_context)
 
-        # Concatenate image features with proprioceptive observations
-        combined_features = torch.cat([image_features, other_obs], dim=-1)
+        # Concatenate image features with ego/team context
+        combined_features = torch.cat([image_features, actor_context], dim=-1)
 
         # RNN processing with explicit state I/O
         combined_features, (h_out, c_out) = self.rnn(
@@ -944,6 +1087,7 @@ class _ActorCriticSRUONNXExporterDualCam(nn.Module):
     def __init__(
         self,
         attn_image_net,
+        actor_relational_encoder,
         memory_a,
         linear_dropout_actor,
         actor,
@@ -956,6 +1100,7 @@ class _ActorCriticSRUONNXExporterDualCam(nn.Module):
         import copy
 
         self.attn_image_net = copy.deepcopy(attn_image_net)
+        self.actor_relational_encoder = copy.deepcopy(actor_relational_encoder)
         self.rnn = copy.deepcopy(memory_a.rnn)
         self.linear = copy.deepcopy(linear_dropout_actor.linear)
         self.activation = copy.deepcopy(linear_dropout_actor.activation)
@@ -978,6 +1123,7 @@ class _ActorCriticSRUONNXExporterDualCam(nn.Module):
         # Split observations into proprioceptive and image parts (2 cameras)
         other_obs = observations[..., :-self.num_image_features * 2]
         other_obs = other_obs.reshape(-1, self.actor_proprioceptive_input_dim)
+        actor_context = self.actor_relational_encoder(other_obs)
 
         # Extract and reshape dual camera images, then stack along depth dimension
         image_obs_front = observations[..., -self.num_image_features * 2: -self.num_image_features]
@@ -988,10 +1134,10 @@ class _ActorCriticSRUONNXExporterDualCam(nn.Module):
         image_stacked = torch.stack([image_front, image_back], dim=2)
 
         # Attention processing (positional encoding cached on first call)
-        image_features = self.attn_image_net(image_stacked, other_obs)
+        image_features = self.attn_image_net(image_stacked, actor_context)
 
-        # Concatenate image features with proprioceptive observations
-        combined_features = torch.cat([image_features, other_obs], dim=-1)
+        # Concatenate image features with ego/team context
+        combined_features = torch.cat([image_features, actor_context], dim=-1)
 
         # RNN processing with explicit state I/O
         combined_features, (h_out, c_out) = self.rnn(

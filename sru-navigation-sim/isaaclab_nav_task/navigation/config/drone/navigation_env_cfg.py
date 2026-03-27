@@ -32,7 +32,7 @@ DEFAULT_PRECOMPUTED_SAFE_POINTS_PATH = os.path.join(
     STATIC_SCAN_DIR,
     "DR_region_safe_points_contact_0p2m_1p2_to_2p0_eroded_0p4m.npz",
 )
-SWARM_TEAMMATE_FEATURE_DIM = 24
+SWARM_TEAMMATE_FEATURE_DIM = 16
 
 
 @configclass
