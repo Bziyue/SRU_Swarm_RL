@@ -350,6 +350,7 @@ isaaclab_nav_task/
 - **DepthNoise**：使用基于视差的滤波模拟真实双目相机深度噪声
 - **DepthNoiseEncoder**：基于 VAE 的深度编码器，使用 RegNet 主干和 Feature Pyramid Network
 - **相机配置**：为不同相机类型提供预定义配置
+- **默认分辨率链路**：`192x120 -> 64x40 -> 64x5x8`
 
 | Camera | Robots | Resolution | Depth Range | Encoder |
 |--------|--------|------------|-------------|---------|
