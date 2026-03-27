@@ -253,10 +253,10 @@ class DroneSwarmNavigationEnvCfg(DirectMARLEnvCfg):
     cluster_entry_radius: float = 1.8
     cluster_success_radius: float = 0.8
     agent_entry_radius: float = 2.4
-    agent_goal_radius: float = 1.1
+    agent_goal_radius: float = 1.25
     success_max_centroid_radius: float = 1.05
     success_max_pairwise_distance: float = 1.80
-    success_hold_steps: int = 12
+    success_hold_steps: int = 8
     contact_force_threshold: float = 0.02
     contact_termination_force_threshold: float = 0.08
     contact_termination_steps: int = 3

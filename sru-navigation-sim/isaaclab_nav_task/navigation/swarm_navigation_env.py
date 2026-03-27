@@ -113,8 +113,11 @@ class DroneSwarmNavigationEnv(DirectMARLEnv):
         self.cluster_max_centroid_radius = torch.zeros((self.num_envs,), dtype=torch.float32, device=self.device)
         self.cluster_max_pairwise_distance = torch.zeros((self.num_envs,), dtype=torch.float32, device=self.device)
         self.cluster_target_region_reached = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
+        self.cluster_target_region_ever_reached = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
         self.cluster_target_region_bonus_awarded = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
         self.cluster_success_hold_steps_buf = torch.zeros((self.num_envs,), dtype=torch.long, device=self.device)
+        self.cluster_target_compact_potential = torch.zeros((self.num_envs,), dtype=torch.float32, device=self.device)
+        self.cluster_prev_target_compact_potential = torch.zeros((self.num_envs,), dtype=torch.float32, device=self.device)
         self.cluster_guidance_progress = torch.zeros((self.num_envs,), dtype=torch.float32, device=self.device)
         self.cluster_prev_guidance_progress = torch.zeros((self.num_envs,), dtype=torch.float32, device=self.device)
         self.cluster_guidance_lateral_error = torch.zeros((self.num_envs,), dtype=torch.float32, device=self.device)
@@ -146,10 +149,7 @@ class DroneSwarmNavigationEnv(DirectMARLEnv):
         self.agent_attitude_failure_streak = {
             agent: torch.zeros((self.num_envs,), dtype=torch.long, device=self.device) for agent in self.agent_ids
         }
-        self._guidance_progress_metric_step = -1
-        self._cached_mean_guidance_progress_delta = torch.tensor(0.0, dtype=torch.float32, device=self.device)
-        self._cached_cluster_guidance_progress_delta = torch.tensor(0.0, dtype=torch.float32, device=self.device)
-        self._cached_cluster_guidance_compactness_gate = torch.tensor(0.0, dtype=torch.float32, device=self.device)
+        self._pending_metrics: dict[str, torch.Tensor] | None = None
         self._pending_log: dict[str, torch.Tensor] | None = None
 
     def _setup_scene(self):
@@ -291,8 +291,76 @@ class DroneSwarmNavigationEnv(DirectMARLEnv):
         progress = min(max((curriculum_iter - warmup_iters) / ramp_iters, 0.0), 1.0)
         return scale_min + progress * (scale_max - scale_min)
 
+    def _compute_cluster_compactness_gate(
+        self, max_pairwise_distance: torch.Tensor, max_centroid_radius: torch.Tensor
+    ) -> torch.Tensor:
+        pairwise_gate_denom = max(
+            float(self.cfg.max_pairwise_separation - self.cfg.success_max_pairwise_distance),
+            1e-6,
+        )
+        centroid_gate_denom = max(
+            float(self.cfg.max_cohesion_radius - self.cfg.success_max_centroid_radius),
+            1e-6,
+        )
+        pairwise_compactness_gate = torch.clamp(
+            (self.cfg.max_pairwise_separation - max_pairwise_distance) / pairwise_gate_denom,
+            min=0.0,
+            max=1.0,
+        )
+        centroid_compactness_gate = torch.clamp(
+            (self.cfg.max_cohesion_radius - max_centroid_radius) / centroid_gate_denom,
+            min=0.0,
+            max=1.0,
+        )
+        return pairwise_compactness_gate * centroid_compactness_gate
+
+    def _compute_target_proximity(self, cluster_goal_distance: torch.Tensor) -> torch.Tensor:
+        target_gate_denom = max(float(self.cfg.cluster_entry_radius - self.cfg.cluster_success_radius), 1e-6)
+        return torch.clamp(
+            (self.cfg.cluster_entry_radius - cluster_goal_distance) / target_gate_denom,
+            min=0.0,
+            max=1.0,
+        )
+
+    def _build_step_metrics(self) -> dict[str, torch.Tensor]:
+        centroid_spread = self._compute_centroid_spread()
+        cluster_compactness_gate = self._compute_cluster_compactness_gate(
+            self.cluster_max_pairwise_distance, self.cluster_max_centroid_radius
+        )
+        mean_progress_delta = torch.stack(
+            [self.agent_guidance_progress[a] - self.agent_prev_guidance_progress[a] for a in self.agent_ids],
+            dim=1,
+        ).mean()
+        cluster_guidance_progress_delta = torch.mean(self.cluster_guidance_progress - self.cluster_prev_guidance_progress)
+        mean_lateral_error = torch.stack(
+            [self.agent_guidance_lateral_error[a] for a in self.agent_ids],
+            dim=1,
+        ).mean()
+        return {
+            "cluster_success_rate": self.cluster_success.float().mean(),
+            "cluster_collision_rate": self.cluster_collision.float().mean(),
+            "cluster_contact_rate": self.cluster_contact.float().mean(),
+            "cluster_fall_rate": self.cluster_fall.float().mean(),
+            "cluster_in_target_region_rate": self.cluster_target_region_reached.float().mean(),
+            "cluster_target_region_rate": self.cluster_target_region_ever_reached.float().mean(),
+            "cluster_target_region_ever_reached_rate": self.cluster_target_region_ever_reached.float().mean(),
+            "cluster_goal_distance": self.cluster_goal_distance.mean(),
+            "cluster_spread": centroid_spread.mean(),
+            "cluster_max_centroid_radius": self.cluster_max_centroid_radius.mean(),
+            "cluster_max_pairwise_distance": self.cluster_max_pairwise_distance.mean(),
+            "cluster_guidance_progress_delta": cluster_guidance_progress_delta,
+            "cluster_guidance_compactness_gate": cluster_compactness_gate.mean(),
+            "cluster_guidance_lateral_error": self.cluster_guidance_lateral_error.mean(),
+            "guidance_progress_delta": mean_progress_delta,
+            "guidance_lateral_error": mean_lateral_error,
+            "teammate_obs_scale": torch.tensor(self._get_teammate_obs_scale(), device=self.device),
+            "swarm_penalty_scale": torch.tensor(self._get_swarm_penalty_scale(), device=self.device),
+            "cluster_collision_termination_enabled": torch.tensor(
+                float(self._is_cluster_collision_termination_enabled()), device=self.device
+            ),
+        }
+
     def _get_observations(self) -> dict[str, dict[str, torch.Tensor]]:
-        self._update_common_buffers()
         teammate_obs_scale = self._get_teammate_obs_scale()
         observations: dict[str, dict[str, torch.Tensor]] = {}
         for agent_idx, agent in enumerate(self.agent_ids):
@@ -367,8 +435,13 @@ class DroneSwarmNavigationEnv(DirectMARLEnv):
 
         for agent in self.agent_ids:
             self._previous_actions[agent].copy_(self.actions[agent])
+            self.extras[agent].pop("metrics", None)
+            self.extras[agent].pop("log", None)
+            if self._pending_metrics is not None:
+                self.extras[agent]["metrics"] = self._pending_metrics
             if self._pending_log is not None:
                 self.extras[agent]["log"] = self._pending_log
+        self._pending_metrics = None
         self._pending_log = None
         return observations
 
@@ -414,7 +487,10 @@ class DroneSwarmNavigationEnv(DirectMARLEnv):
             cluster_progress_reward = (
                 cluster_progress_delta / max(self.cfg.guidance_progress_clamp, 1e-6)
             ) * cluster_compactness_gate
-            target_compact_bonus = self.cluster_target_region_reached.float() * cluster_compactness_gate
+            target_compact_bonus = torch.clamp(
+                self.cluster_target_compact_potential - self.cluster_prev_target_compact_potential,
+                min=0.0,
+            )
         else:
             cluster_compactness_gate = torch.zeros((self.num_envs,), dtype=torch.float32, device=self.device)
             target_compact_bonus = torch.zeros((self.num_envs,), dtype=torch.float32, device=self.device)
@@ -513,6 +589,7 @@ class DroneSwarmNavigationEnv(DirectMARLEnv):
         if self._is_cluster_collision_termination_enabled():
             terminated_common = terminated_common | self.cluster_collision
         terminal_mask = terminated_common | time_out
+        self._pending_metrics = self._build_step_metrics()
         self._pending_log = self._build_terminal_log(terminal_mask, time_out)
         terminated = {agent: terminated_common.clone() for agent in self.agent_ids}
         time_outs = {agent: time_out.clone() for agent in self.agent_ids}
@@ -565,8 +642,11 @@ class DroneSwarmNavigationEnv(DirectMARLEnv):
         self.cluster_max_centroid_radius[env_ids] = 0.0
         self.cluster_max_pairwise_distance[env_ids] = 0.0
         self.cluster_target_region_reached[env_ids] = False
+        self.cluster_target_region_ever_reached[env_ids] = False
         self.cluster_target_region_bonus_awarded[env_ids] = False
         self.cluster_success_hold_steps_buf[env_ids] = 0
+        self.cluster_target_compact_potential[env_ids] = 0.0
+        self.cluster_prev_target_compact_potential[env_ids] = 0.0
 
         for agent_idx, agent in enumerate(self.agent_ids):
             robot = self.robots[agent]
@@ -620,6 +700,7 @@ class DroneSwarmNavigationEnv(DirectMARLEnv):
         self.cluster_fall = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
         self.cluster_max_centroid_radius = centroid_spread.amax(dim=1)
         self.cluster_max_pairwise_distance = pairwise_distances.amax(dim=(1, 2))
+        self.cluster_prev_target_compact_potential.copy_(self.cluster_target_compact_potential)
         agent_goal_distances = []
         for agent in self.agent_ids:
             robot = self.robots[agent]
@@ -664,6 +745,7 @@ class DroneSwarmNavigationEnv(DirectMARLEnv):
         self.cluster_target_region_reached = (self.cluster_goal_distance < self.cfg.cluster_entry_radius) & (
             torch.max(stacked_goal_distances, dim=1).values < self.cfg.agent_entry_radius
         )
+        self.cluster_target_region_ever_reached |= self.cluster_target_region_reached
         success_goal = (self.cluster_goal_distance < self.cfg.cluster_success_radius) & (
             torch.max(stacked_goal_distances, dim=1).values < self.cfg.agent_goal_radius
         )
@@ -681,69 +763,13 @@ class DroneSwarmNavigationEnv(DirectMARLEnv):
         )
         self.cluster_success = self.cluster_success_hold_steps_buf >= self.cfg.success_hold_steps
 
-        pairwise_gate_denom = max(
-            float(self.cfg.max_pairwise_separation - self.cfg.success_max_pairwise_distance),
-            1e-6,
+        cluster_compactness_gate = self._compute_cluster_compactness_gate(
+            self.cluster_max_pairwise_distance, self.cluster_max_centroid_radius
         )
-        centroid_gate_denom = max(
-            float(self.cfg.max_cohesion_radius - self.cfg.success_max_centroid_radius),
-            1e-6,
+        target_proximity = self._compute_target_proximity(self.cluster_goal_distance)
+        self.cluster_target_compact_potential.copy_(
+            self.cluster_target_region_reached.float() * cluster_compactness_gate * target_proximity
         )
-        cluster_compactness_gate = torch.clamp(
-            (self.cfg.max_pairwise_separation - self.cluster_max_pairwise_distance) / pairwise_gate_denom,
-            min=0.0,
-            max=1.0,
-        ) * torch.clamp(
-            (self.cfg.max_cohesion_radius - self.cluster_max_centroid_radius) / centroid_gate_denom,
-            min=0.0,
-            max=1.0,
-        )
-
-        metric_step = int(self.common_step_counter)
-        if self._guidance_progress_metric_step == metric_step:
-            mean_progress_delta = self._cached_mean_guidance_progress_delta
-            cluster_guidance_progress_delta = self._cached_cluster_guidance_progress_delta
-            cached_cluster_compactness_gate = self._cached_cluster_guidance_compactness_gate
-        else:
-            mean_progress_delta = torch.stack(
-                [self.agent_guidance_progress[a] - self.agent_prev_guidance_progress[a] for a in self.agent_ids],
-                dim=1,
-            ).mean()
-            cluster_guidance_progress_delta = torch.mean(
-                self.cluster_guidance_progress - self.cluster_prev_guidance_progress
-            )
-            self._cached_mean_guidance_progress_delta = mean_progress_delta.detach()
-            self._cached_cluster_guidance_progress_delta = cluster_guidance_progress_delta.detach()
-            self._cached_cluster_guidance_compactness_gate = cluster_compactness_gate.mean().detach()
-            self._guidance_progress_metric_step = metric_step
-            cached_cluster_compactness_gate = self._cached_cluster_guidance_compactness_gate
-        mean_lateral_error = torch.stack(
-            [self.agent_guidance_lateral_error[a] for a in self.agent_ids],
-            dim=1,
-        ).mean()
-        mean_spread = centroid_spread.mean()
-        for agent in self.agent_ids:
-            self.extras[agent].pop("log", None)
-            self.extras[agent]["metrics"] = {
-                "cluster_success_rate": self.cluster_success.float().mean(),
-                "cluster_collision_rate": self.cluster_collision.float().mean(),
-                "cluster_contact_rate": self.cluster_contact.float().mean(),
-                "cluster_target_region_rate": self.cluster_target_region_reached.float().mean(),
-                "cluster_goal_distance": self.cluster_goal_distance.mean(),
-                "cluster_spread": mean_spread,
-                "cluster_max_centroid_radius": self.cluster_max_centroid_radius.mean(),
-                "cluster_max_pairwise_distance": self.cluster_max_pairwise_distance.mean(),
-                "cluster_guidance_progress_delta": cluster_guidance_progress_delta,
-                "cluster_guidance_compactness_gate": cached_cluster_compactness_gate,
-                "cluster_guidance_lateral_error": self.cluster_guidance_lateral_error.mean(),
-                "guidance_progress_delta": mean_progress_delta,
-                "guidance_lateral_error": mean_lateral_error,
-                "teammate_obs_scale": torch.tensor(self._get_teammate_obs_scale(), device=self.device),
-                "swarm_penalty_scale": torch.tensor(self._get_swarm_penalty_scale(), device=self.device),
-                "cluster_collision_termination_enabled": torch.tensor(
-                    float(self._is_cluster_collision_termination_enabled()), device=self.device
-                ),
-            }
 
     def _build_terminal_log(self, terminal_mask: torch.Tensor, time_out: torch.Tensor) -> dict[str, torch.Tensor] | None:
         if not torch.any(terminal_mask):
@@ -760,7 +786,8 @@ class DroneSwarmNavigationEnv(DirectMARLEnv):
         terminal_contact = self.cluster_contact & terminal_mask
         terminal_fall = self.cluster_fall & terminal_mask
         terminal_timeout = time_out & terminal_mask
-        terminal_target_region = self.cluster_target_region_reached & terminal_mask
+        terminal_in_target_region = self.cluster_target_region_reached & terminal_mask
+        terminal_target_region = self.cluster_target_region_ever_reached & terminal_mask
         terminal_count = terminal_mask.sum()
         terminal_mask_f = terminal_mask.float()
 
@@ -773,25 +800,24 @@ class DroneSwarmNavigationEnv(DirectMARLEnv):
             dim=1,
         ).mean(dim=1)
 
-        def masked_mean(values: torch.Tensor) -> torch.Tensor:
-            return (values * terminal_mask_f).sum() / terminal_count.float()
+        def masked_sum(values: torch.Tensor) -> torch.Tensor:
+            return (values * terminal_mask_f).sum()
 
         return {
             "terminal_count": terminal_count.float(),
-            "terminal_success_rate": terminal_success.float().sum() / terminal_count.float(),
-            "terminal_collision_present_rate": terminal_collision_present.float().sum() / terminal_count.float(),
-            "terminal_collision_caused_rate": terminal_collision_caused.float().sum() / terminal_count.float(),
-            # Backward-compatible alias: this now means collision-caused terminations.
-            "terminal_collision_rate": terminal_collision_caused.float().sum() / terminal_count.float(),
-            "terminal_contact_rate": terminal_contact.float().sum() / terminal_count.float(),
-            "terminal_fall_rate": terminal_fall.float().sum() / terminal_count.float(),
-            "terminal_target_region_rate": terminal_target_region.float().sum() / terminal_count.float(),
-            "terminal_timeout_rate": terminal_timeout.float().sum() / terminal_count.float(),
-            "terminal_goal_distance": masked_mean(self.cluster_goal_distance),
-            "terminal_mean_agent_goal_distance": masked_mean(mean_goal_distance),
-            "terminal_max_centroid_radius": masked_mean(self.cluster_max_centroid_radius),
-            "terminal_max_pairwise_distance": masked_mean(self.cluster_max_pairwise_distance),
-            "terminal_guidance_lateral_error": masked_mean(mean_lateral_error),
+            "terminal_success_count": terminal_success.float().sum(),
+            "terminal_collision_present_count": terminal_collision_present.float().sum(),
+            "terminal_collision_terminating_condition_count": terminal_collision_caused.float().sum(),
+            "terminal_contact_count": terminal_contact.float().sum(),
+            "terminal_fall_count": terminal_fall.float().sum(),
+            "terminal_in_target_region_count": terminal_in_target_region.float().sum(),
+            "terminal_target_region_count": terminal_target_region.float().sum(),
+            "terminal_timeout_count": terminal_timeout.float().sum(),
+            "terminal_goal_distance_sum": masked_sum(self.cluster_goal_distance),
+            "terminal_mean_agent_goal_distance_sum": masked_sum(mean_goal_distance),
+            "terminal_max_centroid_radius_sum": masked_sum(self.cluster_max_centroid_radius),
+            "terminal_max_pairwise_distance_sum": masked_sum(self.cluster_max_pairwise_distance),
+            "terminal_guidance_lateral_error_sum": masked_sum(mean_lateral_error),
         }
 
     def _sample_spawn_and_goal(

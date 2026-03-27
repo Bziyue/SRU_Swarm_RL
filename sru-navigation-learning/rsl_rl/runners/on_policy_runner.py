@@ -274,6 +274,7 @@ class OnPolicyRunner:
             all_keys = set()
             for ep_info in locs["ep_infos"]:
                 all_keys.update(ep_info.keys())
+            info_tensors: dict[str, torch.Tensor] = {}
             for key in sorted(all_keys):
                 infotensor = torch.tensor([], device=self.device)
                 for ep_info in locs["ep_infos"]:
@@ -284,13 +285,44 @@ class OnPolicyRunner:
                     if len(ep_info[key].shape) == 0:
                         ep_info[key] = ep_info[key].unsqueeze(0)
                     infotensor = torch.cat((infotensor, ep_info[key].to(self.device)))
-                value = torch.mean(infotensor)
-                if "/" in key:
-                    self.writer.add_scalar(key, value, locs["it"])
-                    ep_string += f"""{f'{key}:':>{pad}} {value:.4f}\n"""
+                info_tensors[key] = infotensor
+
+            terminal_total = None
+            if "terminal_count" in info_tensors and info_tensors["terminal_count"].numel() > 0:
+                terminal_total = torch.sum(info_tensors["terminal_count"]).clamp(min=1.0)
+
+            for key in sorted(all_keys):
+                infotensor = info_tensors[key]
+                if infotensor.numel() == 0:
+                    continue
+
+                log_key = key
+                display_label = f"Mean episode {key}:"
+
+                if terminal_total is not None and key == "terminal_count":
+                    value = torch.sum(infotensor)
+                elif (
+                    terminal_total is not None
+                    and key.startswith("terminal_")
+                    and key.endswith("_count")
+                    and key != "terminal_count"
+                ):
+                    value = torch.sum(infotensor) / terminal_total
+                    log_key = key[: -len("_count")] + "_rate"
+                    display_label = f"Mean episode {log_key}:"
+                elif terminal_total is not None and key.startswith("terminal_") and key.endswith("_sum"):
+                    value = torch.sum(infotensor) / terminal_total
+                    log_key = key[: -len("_sum")]
+                    display_label = f"Mean episode {log_key}:"
                 else:
-                    self.writer.add_scalar("Episode/" + key, value, locs["it"])
-                    ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
+                    value = torch.mean(infotensor)
+
+                if "/" in key:
+                    self.writer.add_scalar(log_key, value, locs["it"])
+                    ep_string += f"""{f'{log_key}:':>{pad}} {value:.4f}\n"""
+                else:
+                    self.writer.add_scalar("Episode/" + log_key, value, locs["it"])
+                    ep_string += f"""{f'{display_label}':>{pad}} {value:.4f}\n"""
 
         # Get action std from appropriate actor-critic
         if self.is_mdpo:
