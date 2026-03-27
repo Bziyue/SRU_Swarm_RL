@@ -109,6 +109,7 @@
 - `Swarm` 的队友通道是 `4` 个队友、每个 `4` 维，总计 `16` 维。
 - 当前队友特征定义为：`[dir_x * intensity, dir_y * intensity, intensity, visible]`。
 - curriculum 只缩放 `dir_x / dir_y / intensity`，`visible` 始终保持二值 `0/1`，用于 teammate attention 的可见性掩码。
+- `Swarm` 深度相机默认仍只看静态 `/World/MapMesh`；若训练或播放时传入 `--depth_include_teammates`，则会切换到 multi-mesh ray-caster，把同环境其他无人机的 `body_collision` 也加入深度图。
 
 ### SwarmCompat / Swarm 的输入切分
 

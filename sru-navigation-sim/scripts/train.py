@@ -51,6 +51,12 @@ parser.add_argument("--run_name", type=str, default=None, help="Custom run name 
 parser.add_argument("--resume", action="store_true", default=False, help="Resume training from a checkpoint.")
 parser.add_argument("--load_run", type=str, default=None, help="Run directory name to resume from.")
 parser.add_argument("--checkpoint", type=str, default=None, help="Checkpoint file name or absolute path.")
+parser.add_argument(
+    "--depth_include_teammates",
+    action=argparse.BooleanOptionalAction,
+    default=None,
+    help="For swarm tasks, choose whether depth ray-casting includes teammate collision boxes.",
+)
 
 # Append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -289,6 +295,10 @@ def main():
         agent_cfg.load_run = args_cli.load_run
     if args_cli.checkpoint is not None:
         agent_cfg.load_checkpoint = args_cli.checkpoint
+    if args_cli.depth_include_teammates is not None and hasattr(env_cfg, "depth_include_teammates"):
+        env_cfg.depth_include_teammates = args_cli.depth_include_teammates
+        if hasattr(env_cfg, "apply_depth_raycast_mode"):
+            env_cfg.apply_depth_raycast_mode()
 
     # Create the environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)

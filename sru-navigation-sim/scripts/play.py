@@ -59,6 +59,12 @@ parser.add_argument("--checkpoint", type=str, default=None, help="Path to model 
 parser.add_argument("--use_last_checkpoint", action="store_true", help="Use last checkpoint from logs.")
 parser.add_argument("--export_jit", action="store_true", default=False, help="Export policy as JIT module.")
 parser.add_argument("--export_onnx", action="store_true", default=False, help="Export policy as ONNX model.")
+parser.add_argument(
+    "--depth_include_teammates",
+    action=argparse.BooleanOptionalAction,
+    default=None,
+    help="For swarm tasks, choose whether depth ray-casting includes teammate collision boxes.",
+)
 
 # Append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -469,6 +475,10 @@ def main():
     # Override config from command line
     if args_cli.num_envs is not None:
         env_cfg.scene.num_envs = args_cli.num_envs
+    if args_cli.depth_include_teammates is not None and hasattr(env_cfg, "depth_include_teammates"):
+        env_cfg.depth_include_teammates = args_cli.depth_include_teammates
+        if hasattr(env_cfg, "apply_depth_raycast_mode"):
+            env_cfg.apply_depth_raycast_mode()
 
     # Create the environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)

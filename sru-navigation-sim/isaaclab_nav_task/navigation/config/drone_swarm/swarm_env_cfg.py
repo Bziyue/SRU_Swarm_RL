@@ -8,7 +8,14 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import AssetBaseCfg
 from isaaclab.envs import DirectMARLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sensors import ContactSensorCfg, RayCasterCameraCfg, RayCasterCfg, patterns
+from isaaclab.sensors import (
+    ContactSensorCfg,
+    MultiMeshRayCasterCameraCfg,
+    MultiMeshRayCasterCfg,
+    RayCasterCameraCfg,
+    RayCasterCfg,
+    patterns,
+)
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
@@ -38,28 +45,62 @@ def _make_robot_cfg(index: int):
     return DJI_FPV_CFG.replace(prim_path=f"{{ENV_REGEX_NS}}/Robot_{index}")
 
 
-def _make_camera_cfg(index: int):
-    return RayCasterCameraCfg(
+def _make_camera_offset_cfg():
+    return RayCasterCameraCfg.OffsetCfg(
+        pos=(0.12, 0.0, 0.02),
+        rot=(0.9848078, 0.0, 0.1736482, 0.0),
+        convention="world",
+    )
+
+
+def _make_camera_pattern_cfg():
+    return patterns.PinholeCameraPatternCfg.from_ros_camera_info(
+        fx=72.7025,
+        fy=72.7025,
+        cx=94.4457,
+        cy=62.5424,
+        width=192,
+        height=120,
+        downsample_factor=3,
+    )
+
+
+def _make_teammate_raycast_targets(index: int) -> list[str | MultiMeshRayCasterCfg.RaycastTargetCfg]:
+    targets: list[str | MultiMeshRayCasterCfg.RaycastTargetCfg] = [STATIC_COLLISION_MESH_PRIM_PATH]
+    for other_idx in range(NUM_AGENTS):
+        if other_idx == index:
+            continue
+        targets.append(
+            MultiMeshRayCasterCfg.RaycastTargetCfg(
+                prim_expr=f"{{ENV_REGEX_NS}}/Robot_{other_idx}/body/body_collision",
+                is_shared=False,
+                merge_prim_meshes=True,
+                track_mesh_transforms=True,
+            )
+        )
+    return targets
+
+
+def _make_camera_cfg(index: int, *, include_teammates: bool = False):
+    common_kwargs = dict(
         prim_path=f"{{ENV_REGEX_NS}}/Robot_{index}/body",
-        mesh_prim_paths=[STATIC_COLLISION_MESH_PRIM_PATH],
         update_period=0.0,
-        offset=RayCasterCameraCfg.OffsetCfg(
-            pos=(0.12, 0.0, 0.02),
-            rot=(0.9848078, 0.0, 0.1736482, 0.0),
-            convention="world",
-        ),
+        offset=_make_camera_offset_cfg(),
         data_types=["distance_to_image_plane"],
         debug_vis=False,
         max_distance=11.0,
-        pattern_cfg=patterns.PinholeCameraPatternCfg.from_ros_camera_info(
-            fx=72.7025,
-            fy=72.7025,
-            cx=94.4457,
-            cy=62.5424,
-            width=192,
-            height=120,
-            downsample_factor=3,
-        ),
+        pattern_cfg=_make_camera_pattern_cfg(),
+    )
+    if include_teammates:
+        return MultiMeshRayCasterCameraCfg(
+            mesh_prim_paths=_make_teammate_raycast_targets(index),
+            update_mesh_ids=False,
+            reference_meshes=True,
+            **common_kwargs,
+        )
+    return RayCasterCameraCfg(
+        mesh_prim_paths=[STATIC_COLLISION_MESH_PRIM_PATH],
+        **common_kwargs,
     )
 
 
@@ -170,6 +211,7 @@ class DroneSwarmNavigationEnvCfg(DirectMARLEnvCfg):
 
     action_scale: tuple[float, float, float] = (2.5, 2.5, 1.5)
     max_speed: float = 2.5
+    depth_include_teammates: bool = False
     teammate_observation_radius: float = 6.0
     disable_teammate_observations: bool = False
     solo_pretraining: bool = False
@@ -239,8 +281,17 @@ class DroneSwarmNavigationEnvCfg(DirectMARLEnvCfg):
     reward_overspeed_weight: float = 0.15
     reward_action_rate_weight: float = 0.05
 
+    def apply_depth_raycast_mode(self):
+        """Configure ray-cast cameras for either static-only or teammate-visible depth."""
+        self.scene.raycast_camera_0 = _make_camera_cfg(0, include_teammates=self.depth_include_teammates)
+        self.scene.raycast_camera_1 = _make_camera_cfg(1, include_teammates=self.depth_include_teammates)
+        self.scene.raycast_camera_2 = _make_camera_cfg(2, include_teammates=self.depth_include_teammates)
+        self.scene.raycast_camera_3 = _make_camera_cfg(3, include_teammates=self.depth_include_teammates)
+        self.scene.raycast_camera_4 = _make_camera_cfg(4, include_teammates=self.depth_include_teammates)
+
     def __post_init__(self):
         self.sim.disable_contact_processing = False
+        self.apply_depth_raycast_mode()
         self.scene.robot_0.spawn.rigid_props.disable_gravity = True
         self.scene.robot_1.spawn.rigid_props.disable_gravity = True
         self.scene.robot_2.spawn.rigid_props.disable_gravity = True
