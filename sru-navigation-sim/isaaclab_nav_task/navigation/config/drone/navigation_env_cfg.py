@@ -24,7 +24,7 @@ from isaaclab_nav_task.navigation.mdp.custom_noise import DeltaTransformationNoi
 from isaaclab_nav_task.navigation.mdp.delay_manager import ObservationDelayManagerCfg
 
 
-PLANNING_FREQ = 20.0
+PLANNING_FREQ = 10.0
 STATIC_SCAN_DIR = os.path.join(ISAACLAB_NAV_TASKS_ASSETS_DIR, "Environments", "StaticScan")
 STATIC_VISUAL_MESH_PRIM_PATH = "/World/StaticMesh"
 STATIC_COLLISION_MESH_PRIM_PATH = "/World/MapMesh"
@@ -314,18 +314,18 @@ class DroneEventCfg:
 
 @configclass
 class DroneRewardsCfg:
-    # The 20 Hz policy produces smaller but more frequent action deltas. Increase
-    # the weight moderately so action smoothness stays comparable without over-penalizing.
+    # At 10 Hz, a moderate action-rate penalty is enough to regularize command
+    # smoothness without over-constraining the policy.
     action_rate_l1 = RewTerm(func=mdp.action_rate_l1, weight=-0.1)
     guidance_progress = RewTerm(
         func=mdp.guidance_progress_reward,
         weight=0.7,
-        params={"command_name": "robot_goal", "clamp_delta": 0.075, "lateral_sigma": 0.6},
+        params={"command_name": "robot_goal", "clamp_delta": 0.15, "lateral_sigma": 0.6},
     )
     guidance_wrong_way = RewTerm(
         func=mdp.guidance_wrong_way_penalty,
         weight=-0.3,
-        params={"command_name": "robot_goal", "clamp_delta": 0.05},
+        params={"command_name": "robot_goal", "clamp_delta": 0.1},
     )
     guidance_lateral_error = RewTerm(
         func=mdp.guidance_lateral_error_penalty,
@@ -418,7 +418,7 @@ class DroneStaticNavigationEnvCfg_PLAY_FAST(DroneStaticNavigationEnvCfg):
         self.commands.robot_goal.visualize_region_safe_points = False
         self.commands.robot_goal.visualize_region_boxes = False
         self.observations.policy.enable_corruption = False
-        # Render more frequently than the 20 Hz control loop so local playback looks smooth.
+        # Render more frequently than the 10 Hz control loop so local playback looks smooth.
         self.sim.render_interval = 4
 
 
@@ -445,7 +445,7 @@ class DroneStaticNavigationEnvCfg_SWARM_COMPAT_PLAY_FAST(DroneStaticNavigationEn
         self.commands.robot_goal.visualize_region_safe_points = False
         self.commands.robot_goal.visualize_region_boxes = False
         self.observations.policy.enable_corruption = False
-        # Render more frequently than the 20 Hz control loop so local playback looks smooth.
+        # Render more frequently than the 10 Hz control loop so local playback looks smooth.
         self.sim.render_interval = 4
 
 
