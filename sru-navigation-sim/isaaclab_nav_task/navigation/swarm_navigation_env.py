@@ -186,13 +186,14 @@ class DroneSwarmNavigationEnv(DirectMARLEnv):
     def _encode_teammate_features(
         self, rel_pos_b: torch.Tensor, rel_dist: torch.Tensor, visible: torch.Tensor
     ) -> torch.Tensor:
-        """Encode teammates as direction, intensity, and visibility."""
+        """Encode teammates as weighted direction, intensity, and visibility."""
         dist_scale = max(float(self.cfg.teammate_observation_radius), 1e-6)
         safe_dist = torch.clamp(rel_dist, min=1e-6)
         rel_dir = rel_pos_b / safe_dist
         rel_dir = torch.where(visible > 0.0, rel_dir, torch.zeros_like(rel_dir))
         intensity = torch.clamp(1.0 - rel_dist / dist_scale, min=0.0, max=1.0) * visible
-        return torch.cat((rel_dir, intensity, visible), dim=1)
+        weighted_dir = rel_dir * intensity
+        return torch.cat((weighted_dir, intensity, visible), dim=1)
 
     def set_training_iteration(self, iteration: int) -> None:
         self.current_training_iteration = max(int(iteration), 0)
@@ -321,7 +322,8 @@ class DroneSwarmNavigationEnv(DirectMARLEnv):
             if self.cfg.disable_teammate_observations:
                 teammate_obs = torch.zeros_like(teammate_obs)
             else:
-                teammate_obs = teammate_obs * teammate_obs_scale
+                teammate_feature_stack[..., :-1] = teammate_feature_stack[..., :-1] * teammate_obs_scale
+                teammate_obs = teammate_feature_stack.reshape(self.num_envs, -1)
 
             proprio = torch.cat(
                 (

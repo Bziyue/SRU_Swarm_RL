@@ -107,7 +107,8 @@
 - `SwarmCompat` 与真实 `Swarm` 现在共用同一套 teammate-attention 版 `ActorCriticSRU`。
 - `SwarmCompat` 的队友通道仍保留为 `16` 维，但默认填 `0`，因此会走相同网络骨架，只是 `team context` 退化为全零。
 - `Swarm` 的队友通道是 `4` 个队友、每个 `4` 维，总计 `16` 维。
-- 当前队友特征定义为：`[dir_x, dir_y, intensity, visible]`。
+- 当前队友特征定义为：`[dir_x * intensity, dir_y * intensity, intensity, visible]`。
+- curriculum 只缩放 `dir_x / dir_y / intensity`，`visible` 始终保持二值 `0/1`，用于 teammate attention 的可见性掩码。
 
 ### SwarmCompat / Swarm 的输入切分
 
@@ -141,7 +142,7 @@
 flowchart LR
     subgraph Observations
         EGO["ego_obs (16)"]
-        TEAM["teammate_obs (4 x 4)\n(dir_x, dir_y, intensity, visible)\nSwarmCompat: all zeros"]
+        TEAM["teammate_obs (4 x 4)\n(dir_x*I, dir_y*I, intensity, visible)\nSwarmCompat: all zeros"]
         DEPTH["depth latent (64 x 5 x 8)"]
         HEIGHT["critic only\nheight latent (64 x 7 x 7)"]
         TIME["critic only\ntime_normalized (1)"]
