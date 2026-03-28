@@ -59,6 +59,9 @@ class RslRlPpoActorCriticCfg:
     ego_input_dim: Optional[int] = None
     """Flat ego-observation dimension before any teammate slots are appended."""
 
+    ego_embed_dim: Optional[int] = None
+    """Optional hidden size for the ego projection used before teammate attention."""
+
     teammate_feature_dim: int = 0
     """Feature dimension for one teammate slot. Set to 0 to disable teammate attention."""
 

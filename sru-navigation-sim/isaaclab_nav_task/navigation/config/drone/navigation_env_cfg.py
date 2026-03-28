@@ -314,9 +314,9 @@ class DroneEventCfg:
 
 @configclass
 class DroneRewardsCfg:
-    # At 10 Hz, a moderate action-rate penalty is enough to regularize command
-    # smoothness without over-constraining the policy.
-    action_rate_l1 = RewTerm(func=mdp.action_rate_l1, weight=-0.1)
+    # Keep the original action smoothing strength until we have evidence that
+    # denser 10 Hz control truly needs stronger regularization.
+    action_rate_l1 = RewTerm(func=mdp.action_rate_l1, weight=-0.05)
     guidance_progress = RewTerm(
         func=mdp.guidance_progress_reward,
         weight=0.7,

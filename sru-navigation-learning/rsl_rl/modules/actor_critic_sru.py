@@ -64,6 +64,7 @@ class ActorCriticSRU(nn.Module):
         time_embed_dim: int = 8,
         num_cameras: int = 1,
         ego_input_dim: Optional[int] = None,
+        ego_embed_dim: Optional[int] = None,
         teammate_feature_dim: int = 0,
         max_teammates: int = 0,
         teammate_embed_dim: int = 64,
@@ -124,6 +125,7 @@ class ActorCriticSRU(nn.Module):
             )
             self.actor_relational_encoder = EgoTeammateContextEncoder(
                 ego_input_dim=self.ego_input_dim,
+                ego_embed_dim=ego_embed_dim,
                 teammate_feature_dim=self.teammate_feature_dim,
                 max_teammates=self.max_teammates,
                 embed_dim=teammate_embed_dim,
@@ -132,6 +134,7 @@ class ActorCriticSRU(nn.Module):
             )
             self.critic_relational_encoder = EgoTeammateContextEncoder(
                 ego_input_dim=self.ego_input_dim,
+                ego_embed_dim=ego_embed_dim,
                 teammate_feature_dim=self.teammate_feature_dim,
                 max_teammates=self.max_teammates,
                 embed_dim=teammate_embed_dim,
@@ -823,6 +826,7 @@ class EgoTeammateContextEncoder(nn.Module):
     def __init__(
         self,
         ego_input_dim: int,
+        ego_embed_dim: Optional[int],
         teammate_feature_dim: int,
         max_teammates: int,
         embed_dim: int,
@@ -834,15 +838,19 @@ class EgoTeammateContextEncoder(nn.Module):
             raise ValueError("teammate_embed_dim must be divisible by teammate_attention_heads")
 
         self.ego_input_dim = ego_input_dim
+        self.ego_embed_dim = int(ego_embed_dim or embed_dim)
         self.teammate_feature_dim = teammate_feature_dim
         self.max_teammates = max_teammates
         self.embed_dim = embed_dim
-        self.output_dim = embed_dim * 2
+        self.output_dim = ego_input_dim + self.ego_embed_dim + embed_dim
+
+        if self.ego_embed_dim <= 0:
+            raise ValueError("ego_embed_dim must be positive")
 
         self.ego_encoder = nn.Sequential(
-            nn.Linear(ego_input_dim, embed_dim),
+            nn.Linear(ego_input_dim, self.ego_embed_dim),
             get_activation(activation_name),
-            nn.Linear(embed_dim, embed_dim),
+            nn.Linear(self.ego_embed_dim, self.ego_embed_dim),
             get_activation(activation_name),
         )
         self.teammate_encoder = nn.Sequential(
@@ -851,7 +859,7 @@ class EgoTeammateContextEncoder(nn.Module):
             nn.Linear(embed_dim, embed_dim),
             get_activation(activation_name),
         )
-        self.ego_query = nn.Linear(embed_dim, embed_dim)
+        self.ego_query = nn.Linear(self.ego_embed_dim, embed_dim)
         self.attention = nn.MultiheadAttention(embed_dim=embed_dim, num_heads=num_heads, batch_first=True)
 
     def forward(self, flat_obs: torch.Tensor) -> torch.Tensor:
@@ -878,7 +886,7 @@ class EgoTeammateContextEncoder(nn.Module):
         team_ctx, _ = self.attention(query, teammate_emb, teammate_emb, key_padding_mask=key_padding_mask, need_weights=False)
         team_ctx = team_ctx.squeeze(1)
         team_ctx = torch.where(has_visible.unsqueeze(-1), team_ctx, torch.zeros_like(team_ctx))
-        return torch.cat((ego_emb, team_ctx), dim=-1)
+        return torch.cat((ego_obs, ego_emb, team_ctx), dim=-1)
 
 
 class MemorySRU(torch.nn.Module):

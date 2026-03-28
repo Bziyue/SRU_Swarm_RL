@@ -24,6 +24,7 @@ def _make_swarm_policy_cfg() -> RslRlPpoActorCriticCfg:
         image_input_dims=(64, 5, 8),
         height_input_dims=(64, 7, 7),
         ego_input_dim=16,
+        ego_embed_dim=32,
         teammate_feature_dim=4,
         max_teammates=4,
         teammate_embed_dim=64,

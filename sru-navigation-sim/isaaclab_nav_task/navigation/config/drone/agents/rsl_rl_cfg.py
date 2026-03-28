@@ -14,6 +14,7 @@ def _make_drone_policy_cfg(*, use_teammate_attention: bool = False) -> RslRlPpoA
     if use_teammate_attention:
         extra_kwargs = {
             "ego_input_dim": 16,
+            "ego_embed_dim": 32,
             "teammate_feature_dim": 4,
             "max_teammates": 4,
             "teammate_embed_dim": 64,
@@ -22,9 +23,8 @@ def _make_drone_policy_cfg(*, use_teammate_attention: bool = False) -> RslRlPpoA
 
     return RslRlPpoActorCriticCfg(
         class_name="ActorCriticSRU",
-        # Lower the initial exploration noise to reduce early instability after
-        # moving the high-level controller to 10 Hz with execution delay/lag.
-        init_noise_std=0.7,
+        # Keep the original exploration level while preserving the 10 Hz rollout time scale.
+        init_noise_std=1.0,
         actor_hidden_dims=[512, 256, 128],
         critic_hidden_dims=[512, 256, 128],
         activation="elu",
@@ -59,10 +59,10 @@ class DroneStaticNavPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         value_clip_param=0.2,
         entropy_coef=0.00375,
         num_learning_epochs=5,
-        num_mini_batches=4,
-        # A slightly smaller learning rate is more forgiving with the denser
-        # 10 Hz control updates while preserving the original batch size.
-        learning_rate=7.0e-4,
+        # Doubling rollout steps increases the batch size, so split updates into
+        # more mini-batches to keep each gradient step closer to the previous setup.
+        num_mini_batches=8,
+        learning_rate=1.0e-3,
         schedule="adaptive",
         # Match the original 5 Hz per-second discount / GAE decay after moving to
         # 10 Hz control.

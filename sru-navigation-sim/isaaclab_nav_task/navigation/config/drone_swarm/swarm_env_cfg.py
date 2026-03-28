@@ -8,16 +8,15 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import AssetBaseCfg
 from isaaclab.envs import DirectMARLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sensors import (
-    ContactSensorCfg,
-    MultiMeshRayCasterCameraCfg,
-    MultiMeshRayCasterCfg,
-    RayCasterCameraCfg,
-    RayCasterCfg,
-    patterns,
-)
+from isaaclab.sensors import ContactSensorCfg, RayCasterCameraCfg, RayCasterCfg, patterns
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
+
+try:
+    from isaaclab.sensors import MultiMeshRayCasterCameraCfg, MultiMeshRayCasterCfg
+except ImportError:
+    MultiMeshRayCasterCameraCfg = None
+    MultiMeshRayCasterCfg = None
 
 from isaaclab_nav_task.navigation.assets import DJI_FPV_CFG, ISAACLAB_NAV_TASKS_ASSETS_DIR
 from isaaclab_nav_task.navigation.mdp.depth_utils.camera_config import get_camera_config
@@ -65,8 +64,11 @@ def _make_camera_pattern_cfg():
     )
 
 
-def _make_teammate_raycast_targets(index: int) -> list[str | MultiMeshRayCasterCfg.RaycastTargetCfg]:
-    targets: list[str | MultiMeshRayCasterCfg.RaycastTargetCfg] = [STATIC_COLLISION_MESH_PRIM_PATH]
+def _make_teammate_raycast_targets(index: int) -> list[object]:
+    if MultiMeshRayCasterCfg is None:
+        return [STATIC_COLLISION_MESH_PRIM_PATH]
+
+    targets: list[object] = [STATIC_COLLISION_MESH_PRIM_PATH]
     for other_idx in range(NUM_AGENTS):
         if other_idx == index:
             continue
@@ -91,7 +93,7 @@ def _make_camera_cfg(index: int, *, include_teammates: bool = False):
         max_distance=11.0,
         pattern_cfg=_make_camera_pattern_cfg(),
     )
-    if include_teammates:
+    if include_teammates and MultiMeshRayCasterCameraCfg is not None:
         return MultiMeshRayCasterCameraCfg(
             mesh_prim_paths=_make_teammate_raycast_targets(index),
             update_mesh_ids=False,
