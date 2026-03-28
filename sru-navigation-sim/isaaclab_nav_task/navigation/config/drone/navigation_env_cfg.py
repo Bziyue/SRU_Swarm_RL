@@ -430,7 +430,7 @@ class DroneStaticNavigationEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.dt = 0.005
         self.is_finite_horizon = True
         self.decimation = int((1 / self.sim.dt) / PLANNING_FREQ)
-        self.episode_length_s = 60.0
+        self.episode_length_s = 120.0
         self.sim.render_interval = self.decimation
         self.sim.disable_contact_processing = False
         self.scene.robot.spawn.rigid_props.disable_gravity = not self.actions.accel_command.use_controller
