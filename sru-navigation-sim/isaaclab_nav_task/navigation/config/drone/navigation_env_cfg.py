@@ -12,6 +12,7 @@ from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
+from isaaclab.managers import CurriculumTermCfg as CurrTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import ContactSensorCfg, RayCasterCameraCfg, RayCasterCfg, patterns
 from isaaclab.utils import configclass
@@ -343,20 +344,57 @@ class DroneRewardsCfg:
         weight=1.5,
         params={"command_name": "robot_goal", "sigmoid": 0.25, "T_r": 0.1, "probability": 0.01, "flat": True, "ratio": False},
     )
+    enter_target_region = RewTerm(
+        func=mdp.enter_target_region_bonus,
+        weight=2.0,
+        params={"command_name": "robot_goal"},
+    )
+    success_bonus = RewTerm(
+        func=mdp.success_bonus,
+        weight=10.0,
+        params={"command_name": "robot_goal", "distance_threshold": 0.5, "max_xy_speed": 0.25, "hold_time_s": 1.0},
+    )
 
 
 @configclass
 class DroneTerminationsCfg:
-    time_out = DoneTerm(func=mdp.time_out_navigation, time_out=True, params={"distance_threshold": 0.5})
+    time_out = DoneTerm(
+        func=mdp.time_out_navigation,
+        time_out=True,
+        params={"distance_threshold": 0.5, "max_xy_speed": 0.25, "hold_time_s": 1.0},
+    )
     body_contact = DoneTerm(
         func=mdp.illegal_contact_navigation,
         params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=["body"]), "threshold": 0.01},
     )
-    early_termination = DoneTerm(func=mdp.at_goal_navigation, time_out=True, params={"distance_threshold": 0.5})
+    early_termination = DoneTerm(
+        func=mdp.at_goal_navigation,
+        time_out=True,
+        params={"distance_threshold": 0.5, "max_xy_speed": 0.25, "hold_time_s": 1.0},
+    )
     terrain_fall = DoneTerm(
         func=mdp.terrain_fall,
         time_out=True,
         params={"fall_height_threshold": 0.5},
+    )
+
+
+@configclass
+class DroneCurriculumCfg:
+    success_gate = CurrTerm(
+        func=mdp.success_gate_curriculum,
+        params={
+            "warmup_steps": 32_000,
+            "ramp_steps": 96_000,
+            "start_distance_threshold": 0.6,
+            "final_distance_threshold": 0.5,
+            "start_max_xy_speed": 0.35,
+            "final_max_xy_speed": 0.25,
+            "start_hold_time_s": 0.5,
+            "final_hold_time_s": 1.0,
+            "termination_terms": ("time_out", "early_termination"),
+            "reward_terms": ("success_bonus",),
+        },
     )
 
 
@@ -368,6 +406,7 @@ class DroneStaticNavigationEnvCfg(ManagerBasedRLEnvCfg):
     commands: DroneCommandsCfg = DroneCommandsCfg()
     rewards: DroneRewardsCfg = DroneRewardsCfg()
     terminations: DroneTerminationsCfg = DroneTerminationsCfg()
+    curriculum: DroneCurriculumCfg = DroneCurriculumCfg()
     events: DroneEventCfg = DroneEventCfg()
     delay_cfg: ObservationDelayManagerCfg = ObservationDelayManagerCfg()
 

@@ -186,3 +186,41 @@ def guidance_lateral_error_penalty(
     )
     normalized_error = lateral_error / max(sigma, 1e-6)
     return 1.0 - torch.exp(-0.5 * torch.square(normalized_error))
+
+
+def enter_target_region_bonus(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+) -> torch.Tensor:
+    """Reward the first time the agent enters the sampled target region in an episode."""
+    goal_cmd_generator = env.command_manager._terms[command_name]
+    target_region_reached = goal_cmd_generator._points_inside_regions(
+        env.scene["robot"].data.root_pos_w[:, :2],
+        goal_cmd_generator.goal_region_ids,
+    )
+    enter_bonus = target_region_reached & ~goal_cmd_generator.target_region_bonus_awarded
+    goal_cmd_generator.target_region_reached = target_region_reached
+    goal_cmd_generator.target_region_ever_reached |= target_region_reached
+    goal_cmd_generator.target_region_bonus_awarded |= target_region_reached
+    return enter_bonus.float()
+
+
+def success_bonus(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    distance_threshold: float = 0.5,
+    max_xy_speed: float = 0.25,
+    hold_time_s: float = 1.0,
+) -> torch.Tensor:
+    """Reward successful goal completion once when the hold-time termination is met."""
+    goal_cmd_generator = env.command_manager._terms[command_name]
+    asset: Articulation = env.scene["robot"]
+
+    xy_error = torch.norm(asset.data.root_pos_w[:, :2] - goal_cmd_generator.goal_position_world[:, :2], dim=1)
+    xy_speed = torch.norm(asset.data.root_lin_vel_w[:, :2], dim=1)
+    stable_hover = torch.logical_and(xy_error < distance_threshold, xy_speed < max_xy_speed)
+    required_steps = max(int(round(hold_time_s / env.step_dt)), 1)
+    success = torch.logical_and(stable_hover, goal_cmd_generator.time_at_goal_in_steps >= required_steps)
+    reward_mask = success & ~goal_cmd_generator.success_bonus_awarded
+    goal_cmd_generator.success_bonus_awarded |= success
+    return reward_mask.float()

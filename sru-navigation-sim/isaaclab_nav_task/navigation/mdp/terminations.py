@@ -24,6 +24,18 @@ if TYPE_CHECKING:
     from isaaclab_nav_task.navigation.mdp.navigation.goal_commands import RobotNavigationGoalCommand
 
 
+def _stable_goal_hover_mask(
+    asset: Articulation,
+    goal_cmd_generator: "RobotNavigationGoalCommand",
+    distance_threshold: float,
+    max_xy_speed: float,
+) -> torch.Tensor:
+    """Check whether the robot is both near the goal and moving slowly enough to count as stable hover."""
+    xy_error = torch.norm(asset.data.root_pos_w[:, :2] - goal_cmd_generator.goal_position_world[:, :2], dim=1)
+    xy_speed = torch.norm(asset.data.root_lin_vel_w[:, :2], dim=1)
+    return torch.logical_and(xy_error < distance_threshold, xy_speed < max_xy_speed)
+
+
 def euler_xyz_from_quat_wrapped(quat: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Convert quaternion to Euler angles (XYZ convention) with wrapping to [-pi, pi].
 
@@ -44,7 +56,9 @@ def euler_xyz_from_quat_wrapped(quat: torch.Tensor) -> tuple[torch.Tensor, torch
 def time_out_navigation(
     env: "ManagerBasedRLEnv",
     goal_cmd_name: str = "robot_goal",
-    distance_threshold: float = 0.5
+    distance_threshold: float = 0.5,
+    max_xy_speed: float = 0.25,
+    hold_time_s: float = 1.0,
 ) -> torch.Tensor:
     """Terminate the episode when the episode length exceeds the maximum episode length.
 
@@ -59,14 +73,18 @@ def time_out_navigation(
 
     env_ids = torch.where(termination)[0]
 
-    distance_goal = torch.norm(asset.data.root_pos_w[:, :2] - goal_cmd_generator.goal_position_world[:, :2], dim=1)
-
-    # update time at goal
-    goal_cmd_generator.time_at_goal[distance_goal < distance_threshold] += 1 * env.step_dt
+    stable_hover = _stable_goal_hover_mask(
+        asset=asset,
+        goal_cmd_generator=goal_cmd_generator,
+        distance_threshold=distance_threshold,
+        max_xy_speed=max_xy_speed,
+    )
 
     if env_ids.numel() > 0:  # Check if env_ids is not empty
-        success_masks = goal_cmd_generator.time_at_goal > 0.0
-        value_buffer = torch.zeros_like(distance_goal)  # init with 0: Fail
+        required_steps = max(int(round(hold_time_s / env.step_dt)), 1)
+        predicted_steps = goal_cmd_generator.time_at_goal_in_steps + stable_hover.float()
+        success_masks = predicted_steps >= required_steps
+        value_buffer = torch.zeros_like(stable_hover, dtype=torch.float)  # init with 0: Fail
         value_buffer[success_masks] = 1.0  # Success
         goal_cmd_generator.goal_reached_buffer.add(value_buffer, env_ids)
 
@@ -132,6 +150,8 @@ def at_goal_navigation(
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     distance_threshold: float = 0.5,
     goal_cmd_name: str = "robot_goal",
+    max_xy_speed: float = 0.25,
+    hold_time_s: float = 1.0,
 ) -> torch.Tensor:
     """Terminate the episode when the goal is reached.
 
@@ -150,26 +170,39 @@ def at_goal_navigation(
     asset: Articulation = env.scene[asset_cfg.name]
     goal_cmd_generator: RobotNavigationGoalCommand = env.command_manager._terms.get(goal_cmd_name)
 
-    # Calculate distance to goal
-    xy_error = torch.norm(asset.data.root_pos_w[:, :2] - goal_cmd_generator.goal_position_world[:, :2], dim=1)
-
-    # Check conditions for termination
-    at_goal = xy_error < distance_threshold
-
-    # already at goal
-    already_at_goal = goal_cmd_generator.time_at_goal > 0.0
-    at_goal = torch.logical_or(at_goal, already_at_goal)
-
-    # Update the time at goal in steps
-    goal_cmd_generator.time_at_goal_in_steps[at_goal] += 1  # Increment if at goal
+    stable_hover = _stable_goal_hover_mask(
+        asset=asset,
+        goal_cmd_generator=goal_cmd_generator,
+        distance_threshold=distance_threshold,
+        max_xy_speed=max_xy_speed,
+    )
+    goal_cmd_generator.time_at_goal = torch.where(
+        stable_hover,
+        goal_cmd_generator.time_at_goal + env.step_dt,
+        torch.zeros_like(goal_cmd_generator.time_at_goal),
+    )
+    goal_cmd_generator.steps_at_goal = torch.where(
+        stable_hover,
+        goal_cmd_generator.time_at_goal_in_steps + 1,
+        torch.zeros_like(goal_cmd_generator.time_at_goal_in_steps),
+    )
 
     # Determine if termination condition is met
-    termination = goal_cmd_generator.time_at_goal_in_steps > goal_cmd_generator.required_time_at_goal_in_steps
+    required_steps = max(int(round(hold_time_s / env.step_dt)), 1)
+    termination = goal_cmd_generator.time_at_goal_in_steps >= required_steps
 
     # Update goal reached buffer if termination condition is met
     env_ids = torch.where(termination)[0]
     if env_ids.numel() > 0:  # Check if any environments have met the termination condition
-        goal_cmd_generator.goal_reached_buffer.add(torch.ones_like(termination, dtype=torch.float), env_ids)
+        # `time_out_navigation()` already records the terminal result for episodes that expire on the
+        # same step. Skip those envs here so the success tracker receives one result per episode.
+        timed_out = env.episode_length_buf >= env.max_episode_length
+        success_env_ids = torch.where(termination & ~timed_out)[0]
+        if success_env_ids.numel() > 0:
+            goal_cmd_generator.goal_reached_buffer.add(
+                torch.ones_like(termination, dtype=torch.float),
+                success_env_ids,
+            )
 
     return termination
 

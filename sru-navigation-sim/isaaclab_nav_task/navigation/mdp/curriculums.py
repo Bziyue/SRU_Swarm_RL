@@ -54,3 +54,89 @@ def disable_backward_penalty_after_steps(
                 pass
     
     return torch.tensor(float(env.common_step_counter))
+
+
+def success_gate_curriculum(
+    env: ManagerBasedRLEnv,
+    env_ids: Sequence[int],
+    warmup_steps: int = 32_000,
+    ramp_steps: int = 96_000,
+    start_distance_threshold: float = 0.6,
+    final_distance_threshold: float = 0.5,
+    start_max_xy_speed: float = 0.35,
+    final_max_xy_speed: float = 0.25,
+    start_hold_time_s: float = 0.5,
+    final_hold_time_s: float = 1.0,
+    termination_terms: tuple[str, ...] = ("time_out", "early_termination"),
+    reward_terms: tuple[str, ...] = ("success_bonus",),
+) -> dict[str, float]:
+    """Gradually tighten the success gate over training.
+
+    The schedule is:
+    - Warmup: keep the easier starting thresholds.
+    - Ramp: linearly interpolate to the final thresholds.
+    - Final: keep the stricter thresholds.
+    """
+    del env_ids
+
+    steps = int(env.common_step_counter)
+    if steps <= warmup_steps:
+        progress = 0.0
+    elif ramp_steps <= 0:
+        progress = 1.0
+    else:
+        progress = min(max((steps - warmup_steps) / float(ramp_steps), 0.0), 1.0)
+
+    distance_threshold = (1.0 - progress) * start_distance_threshold + progress * final_distance_threshold
+    max_xy_speed = (1.0 - progress) * start_max_xy_speed + progress * final_max_xy_speed
+    hold_time_s = (1.0 - progress) * start_hold_time_s + progress * final_hold_time_s
+
+    if hasattr(env, "termination_manager") and hasattr(env.termination_manager, "get_term_cfg"):
+        for term_name in termination_terms:
+            try:
+                term_cfg = env.termination_manager.get_term_cfg(term_name)
+            except KeyError:
+                continue
+            params = dict(term_cfg.params or {})
+            changed = False
+            if "distance_threshold" in params and abs(float(params["distance_threshold"]) - distance_threshold) > 1e-6:
+                params["distance_threshold"] = float(distance_threshold)
+                changed = True
+            if "max_xy_speed" in params and abs(float(params["max_xy_speed"]) - max_xy_speed) > 1e-6:
+                params["max_xy_speed"] = float(max_xy_speed)
+                changed = True
+            if "hold_time_s" in params and abs(float(params["hold_time_s"]) - hold_time_s) > 1e-6:
+                params["hold_time_s"] = float(hold_time_s)
+                changed = True
+            if changed:
+                term_cfg.params = params
+                env.termination_manager.set_term_cfg(term_name, term_cfg)
+
+    if hasattr(env, "reward_manager") and hasattr(env.reward_manager, "get_term_cfg"):
+        for term_name in reward_terms:
+            try:
+                term_cfg = env.reward_manager.get_term_cfg(term_name)
+            except KeyError:
+                continue
+            params = dict(term_cfg.params or {})
+            changed = False
+            if "distance_threshold" in params and abs(float(params["distance_threshold"]) - distance_threshold) > 1e-6:
+                params["distance_threshold"] = float(distance_threshold)
+                changed = True
+            if "max_xy_speed" in params and abs(float(params["max_xy_speed"]) - max_xy_speed) > 1e-6:
+                params["max_xy_speed"] = float(max_xy_speed)
+                changed = True
+            if "hold_time_s" in params and abs(float(params["hold_time_s"]) - hold_time_s) > 1e-6:
+                params["hold_time_s"] = float(hold_time_s)
+                changed = True
+            if changed:
+                term_cfg.params = params
+                env.reward_manager.set_term_cfg(term_name, term_cfg)
+
+    return {
+        "common_step_counter": float(steps),
+        "distance_threshold": float(distance_threshold),
+        "max_xy_speed": float(max_xy_speed),
+        "hold_time_s": float(hold_time_s),
+        "progress": float(progress),
+    }

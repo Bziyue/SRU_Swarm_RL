@@ -564,6 +564,10 @@ class StaticRegionGoalCommand(CommandTerm):
         self.guidance_progress_delta = torch.zeros(self.num_envs, device=self.device)
         self.guidance_lateral_error = torch.zeros(self.num_envs, device=self.device)
         self.guidance_vis_point_cap = 160
+        self.target_region_reached = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.target_region_ever_reached = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.target_region_bonus_awarded = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.success_bonus_awarded = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
         self.steps_at_goal = torch.zeros(self.num_envs, device=self.device)
         self.time_at_goal = torch.zeros(self.num_envs, device=self.device)
@@ -582,6 +586,8 @@ class StaticRegionGoalCommand(CommandTerm):
         self.metrics["success_rate"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["active_guidance_assignments"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["active_guidance_unique"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["in_target_region_rate"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["target_region_rate"] = torch.zeros(self.num_envs, device=self.device)
 
     def _build_region_safe_points_vis(
         self,
@@ -799,6 +805,8 @@ class StaticRegionGoalCommand(CommandTerm):
         active_unique = float(torch.unique(self.current_guidance_ids).numel())
         self.metrics["active_guidance_assignments"].fill_(active_assignments)
         self.metrics["active_guidance_unique"].fill_(active_unique)
+        self.metrics["in_target_region_rate"] = self.target_region_reached.float()
+        self.metrics["target_region_rate"] = self.target_region_ever_reached.float()
 
     def _resample_command(self, env_ids: Sequence[int]):
         if isinstance(env_ids, torch.Tensor):
@@ -839,6 +847,10 @@ class StaticRegionGoalCommand(CommandTerm):
         self.previous_guidance_progress[env_ids_tensor] = start_progress
         self.guidance_progress_delta[env_ids_tensor] = 0.0
         self.guidance_lateral_error[env_ids_tensor] = start_lateral_error
+        self.target_region_reached[env_ids_tensor] = False
+        self.target_region_ever_reached[env_ids_tensor] = False
+        self.target_region_bonus_awarded[env_ids_tensor] = False
+        self.success_bonus_awarded[env_ids_tensor] = False
 
     def _update_command(self):
         inverse_pos, inverse_rot = subtract_frame_transforms(self.robot.data.root_pos_w, self.robot.data.root_quat_w)
@@ -865,6 +877,8 @@ class StaticRegionGoalCommand(CommandTerm):
         self.guidance_progress.copy_(guidance_progress)
         self.guidance_progress_delta.copy_(self.guidance_progress - self.previous_guidance_progress)
         self.guidance_lateral_error.copy_(guidance_lateral_error)
+        self.target_region_reached = self._points_inside_regions(self.robot.data.root_pos_w[:, :2], self.goal_region_ids)
+        self.target_region_ever_reached |= self.target_region_reached
 
     def reset(self, env_ids: Sequence[int] | None = None) -> dict[str, float]:
         metrics_obs = self.env.observation_manager.compute_group(group_name="metrics")
