@@ -337,12 +337,28 @@ class DroneRewardsCfg:
     reach_goal_xy_soft = RewTerm(
         func=mdp.reach_goal_xyz,
         weight=0.25,
-        params={"command_name": "robot_goal", "sigmoid": 2.5, "T_r": 1.0, "probability": 0.01, "flat": True, "ratio": False},
+        params={
+            "command_name": "robot_goal",
+            "sigmoid": 2.5,
+            "T_r": 1.0,
+            "probability": 0.01,
+            "flat": True,
+            "ratio": False,
+            "proximity_threshold": 0.5,
+        },
     )
     reach_goal_xy_tight = RewTerm(
         func=mdp.reach_goal_xyz,
         weight=1.5,
-        params={"command_name": "robot_goal", "sigmoid": 0.25, "T_r": 0.1, "probability": 0.01, "flat": True, "ratio": False},
+        params={
+            "command_name": "robot_goal",
+            "sigmoid": 0.25,
+            "T_r": 0.1,
+            "probability": 0.01,
+            "flat": True,
+            "ratio": False,
+            "proximity_threshold": 0.5,
+        },
     )
     enter_target_region = RewTerm(
         func=mdp.enter_target_region_bonus,

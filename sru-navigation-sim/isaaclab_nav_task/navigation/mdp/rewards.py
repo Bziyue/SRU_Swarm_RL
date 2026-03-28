@@ -68,6 +68,7 @@ def reach_goal_xyz(
     probability: float,
     flat: bool,
     ratio: bool,
+    proximity_threshold: float | None = None,
 ) -> torch.Tensor:
     """Reward goal reaching with configurable sigmoid shaping.
 
@@ -79,6 +80,8 @@ def reach_goal_xyz(
         probability: Probability of random sampling.
         flat: Whether to only consider xy error (ignore z).
         ratio: Whether to scale by travel distance ratio.
+        proximity_threshold: Optional distance threshold that activates the reward as soon as the
+            robot is currently close to the goal, without requiring stable-hover bookkeeping.
 
     Returns:
         Dense reward based on distance to goal.
@@ -102,6 +105,8 @@ def reach_goal_xyz(
 
     arrive_mask = goal_cmd_generator.time_at_goal > 0.0
     reward_mask = torch.logical_or(timeup_mask, arrive_mask)
+    if proximity_threshold is not None:
+        reward_mask = torch.logical_or(reward_mask, xyz_error < proximity_threshold)
 
     if ratio:
         # Calculate the travel distance ratio relative to the initial goal distance
