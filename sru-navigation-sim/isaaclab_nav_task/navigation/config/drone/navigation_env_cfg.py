@@ -315,18 +315,16 @@ class DroneEventCfg:
 
 @configclass
 class DroneRewardsCfg:
-    # Keep the original action smoothing strength until we have evidence that
-    # denser 10 Hz control truly needs stronger regularization.
     action_rate_l1 = RewTerm(func=mdp.action_rate_l1, weight=-0.05)
     guidance_progress = RewTerm(
         func=mdp.guidance_progress_reward,
         weight=0.7,
-        params={"command_name": "robot_goal", "clamp_delta": 0.15, "lateral_sigma": 0.6},
+        params={"command_name": "robot_goal", "clamp_delta": 0.3, "lateral_sigma": 0.6},
     )
     guidance_wrong_way = RewTerm(
         func=mdp.guidance_wrong_way_penalty,
         weight=-0.3,
-        params={"command_name": "robot_goal", "clamp_delta": 0.1},
+        params={"command_name": "robot_goal", "clamp_delta": 0.2},
     )
     guidance_lateral_error = RewTerm(
         func=mdp.guidance_lateral_error_penalty,
@@ -344,7 +342,6 @@ class DroneRewardsCfg:
             "probability": 0.01,
             "flat": True,
             "ratio": False,
-            "proximity_threshold": 0.5,
         },
     )
     reach_goal_xy_tight = RewTerm(
@@ -357,37 +354,18 @@ class DroneRewardsCfg:
             "probability": 0.01,
             "flat": True,
             "ratio": False,
-            "proximity_threshold": 0.5,
         },
-    )
-    enter_target_region = RewTerm(
-        func=mdp.enter_target_region_bonus,
-        weight=2.0,
-        params={"command_name": "robot_goal"},
-    )
-    success_bonus = RewTerm(
-        func=mdp.success_bonus,
-        weight=10.0,
-        params={"command_name": "robot_goal", "distance_threshold": 0.5, "max_xy_speed": 0.25, "hold_time_s": 1.0},
     )
 
 
 @configclass
 class DroneTerminationsCfg:
-    time_out = DoneTerm(
-        func=mdp.time_out_navigation,
-        time_out=True,
-        params={"distance_threshold": 0.5, "max_xy_speed": 0.25, "hold_time_s": 1.0},
-    )
+    time_out = DoneTerm(func=mdp.time_out_navigation, time_out=True, params={"distance_threshold": 0.5})
     body_contact = DoneTerm(
         func=mdp.illegal_contact_navigation,
         params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=["body"]), "threshold": 0.01},
     )
-    early_termination = DoneTerm(
-        func=mdp.at_goal_navigation,
-        time_out=True,
-        params={"distance_threshold": 0.5, "max_xy_speed": 0.25, "hold_time_s": 1.0},
-    )
+    early_termination = DoneTerm(func=mdp.at_goal_navigation, time_out=True, params={"distance_threshold": 0.5})
     terrain_fall = DoneTerm(
         func=mdp.terrain_fall,
         time_out=True,
@@ -397,19 +375,14 @@ class DroneTerminationsCfg:
 
 @configclass
 class DroneCurriculumCfg:
-    success_gate = CurrTerm(
-        func=mdp.success_gate_curriculum,
+    episode_horizon = CurrTerm(
+        func=mdp.staged_episode_horizon_curriculum,
         params={
-            "warmup_steps": 32_000,
-            "ramp_steps": 96_000,
-            "start_distance_threshold": 0.6,
-            "final_distance_threshold": 0.5,
-            "start_max_xy_speed": 0.35,
-            "final_max_xy_speed": 0.25,
-            "start_hold_time_s": 0.5,
-            "final_hold_time_s": 1.0,
-            "termination_terms": ("time_out", "early_termination"),
-            "reward_terms": ("success_bonus",),
+            "first_stage_steps": 64_000,
+            "second_stage_steps": 96_000,
+            "first_stage_seconds": 60.0,
+            "second_stage_seconds": 90.0,
+            "final_stage_seconds": 120.0,
         },
     )
 
@@ -430,7 +403,7 @@ class DroneStaticNavigationEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.dt = 0.005
         self.is_finite_horizon = True
         self.decimation = int((1 / self.sim.dt) / PLANNING_FREQ)
-        self.episode_length_s = 120.0
+        self.episode_length_s = 60.0
         self.sim.render_interval = self.decimation
         self.sim.disable_contact_processing = False
         self.scene.robot.spawn.rigid_props.disable_gravity = not self.actions.accel_command.use_controller

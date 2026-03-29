@@ -140,3 +140,40 @@ def success_gate_curriculum(
         "hold_time_s": float(hold_time_s),
         "progress": float(progress),
     }
+
+
+def staged_episode_horizon_curriculum(
+    env: ManagerBasedRLEnv,
+    env_ids: Sequence[int],
+    first_stage_steps: int = 64_000,
+    second_stage_steps: int = 96_000,
+    first_stage_seconds: float = 60.0,
+    second_stage_seconds: float = 90.0,
+    final_stage_seconds: float = 120.0,
+) -> dict[str, float]:
+    """Stage the episode horizon over training.
+
+    This keeps the early solo-pretrain objective close to the reference setup while still
+    exposing longer horizons later for long-path samples.
+    """
+    del env_ids
+
+    steps = int(env.common_step_counter)
+    if steps < first_stage_steps:
+        stage = 0
+        target_seconds = first_stage_seconds
+    elif steps < second_stage_steps:
+        stage = 1
+        target_seconds = second_stage_seconds
+    else:
+        stage = 2
+        target_seconds = final_stage_seconds
+
+    if abs(float(env.cfg.episode_length_s) - float(target_seconds)) > 1e-6:
+        env.cfg.episode_length_s = float(target_seconds)
+
+    return {
+        "common_step_counter": float(steps),
+        "episode_length_s": float(env.cfg.episode_length_s),
+        "stage": float(stage),
+    }

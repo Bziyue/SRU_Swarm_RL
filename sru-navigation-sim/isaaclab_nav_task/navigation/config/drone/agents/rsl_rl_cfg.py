@@ -41,7 +41,6 @@ def _make_drone_policy_cfg(*, use_teammate_attention: bool = False) -> RslRlPpoA
 
 @configclass
 class DroneStaticNavPPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    # Keep a ~3.2 s rollout horizon after moving to 10 Hz control.
     num_steps_per_env = 32
     max_iterations = 15000
     save_interval = 500
@@ -59,15 +58,11 @@ class DroneStaticNavPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         value_clip_param=0.2,
         entropy_coef=0.00375,
         num_learning_epochs=5,
-        # Doubling rollout steps increases the batch size, so split updates into
-        # more mini-batches to keep each gradient step closer to the previous setup.
-        num_mini_batches=8,
+        num_mini_batches=4,
         learning_rate=1.0e-3,
         schedule="adaptive",
-        # Match the original 5 Hz per-second discount / GAE decay after moving to
-        # 10 Hz control.
-        gamma=0.9974968672,
-        lam=0.9746794345,
+        gamma=0.995,
+        lam=0.95,
         desired_kl=0.01,
         max_grad_norm=1.0,
     )
