@@ -47,6 +47,26 @@ min_depth = 0.0
 max_depth = 0.0
 
 
+def _resolve_depth_model_device(reference_device: Optional[torch.device] = None) -> torch.device:
+    """Resolve the CUDA device used by the shared depth encoder."""
+    if reference_device is not None and reference_device.type == "cuda":
+        return reference_device
+    if torch.cuda.is_available():
+        return torch.device(f"cuda:{torch.cuda.current_device()}")
+    return torch.device("cpu")
+
+
+def _move_depth_models_to_device(device: torch.device) -> None:
+    """Keep the cached depth encoder and JIT module on the same device as the input tensor."""
+    global DEPTH_NOISE_GENERATOR, JIT_DEPTH_NOISE_GENERATOR
+
+    if DEPTH_NOISE_GENERATOR is not None:
+        DEPTH_NOISE_GENERATOR = DEPTH_NOISE_GENERATOR.to(device)
+
+    if JIT_DEPTH_NOISE_GENERATOR is not None:
+        JIT_DEPTH_NOISE_GENERATOR = JIT_DEPTH_NOISE_GENERATOR.to(device)
+
+
 def _update_depth_window(camera_name: str, depth_tensor: torch.Tensor, height: int, width: int, title: str) -> None:
     """Update (or lazily create) a persistent matplotlib window for a camera.
 
@@ -126,10 +146,12 @@ def _ensure_depth_noise_generator_initialized(
 
     # Initialize encoder with the new simplified API
     # The DepthNoiseEncoder now takes camera_config directly
+    model_device = _resolve_depth_model_device()
+
     DEPTH_NOISE_GENERATOR = DepthNoiseEncoder(
         feature_dim=feature_dim,
         camera_config=config,
-    ).to(torch.device("cuda"))
+    ).to(model_device)
     DEPTH_NOISE_GENERATOR.eval()
 
     # Create JIT version for inference (optional optimization)
@@ -139,12 +161,12 @@ def _ensure_depth_noise_generator_initialized(
         jit_path = config.depth_encoder_path.replace('.pth', '_jit.pt') if config.depth_encoder_path else None
         if jit_path and os.path.exists(jit_path):
             print(f"  Loading precompiled JIT model from: {jit_path}")
-            JIT_DEPTH_NOISE_GENERATOR = torch.jit.load(jit_path, map_location="cuda")
+            JIT_DEPTH_NOISE_GENERATOR = torch.jit.load(jit_path, map_location=model_device)
             JIT_DEPTH_NOISE_GENERATOR = torch.jit.optimize_for_inference(JIT_DEPTH_NOISE_GENERATOR)
         else:
             print(f"  JIT compilation requested but no precompiled model found.")
             print(f"  Creating JIT model from encoder...")
-            example_input = torch.randn(1, 1, resolution[1], resolution[0]).cuda()  # (B, C, H, W)
+            example_input = torch.randn(1, 1, resolution[1], resolution[0], device=model_device)  # (B, C, H, W)
             JIT_DEPTH_NOISE_GENERATOR = torch.jit.trace(DEPTH_NOISE_GENERATOR, example_input)
             JIT_DEPTH_NOISE_GENERATOR = torch.jit.optimize_for_inference(JIT_DEPTH_NOISE_GENERATOR)
     else:
@@ -400,6 +422,7 @@ def depth_image_prefect(env, sensor_cfg):
     assert JIT_DEPTH_NOISE_GENERATOR is not None, (
         "Depth encoder JIT model is not initialized. Call initialize_depth_noise_generator first."
     )
+    _move_depth_models_to_device(depth_tensor.device)
     model = cast(torch.jit.ScriptModule, JIT_DEPTH_NOISE_GENERATOR)
     if use_jit:
         depth_tensor[depth_tensor > max_depth] = 0.0
@@ -445,6 +468,7 @@ def depth_image_noisy_delayed(
     assert JIT_DEPTH_NOISE_GENERATOR is not None, (
         "Depth encoder JIT model is not initialized. Call initialize_depth_noise_generator first."
     )
+    _move_depth_models_to_device(depth_tensor.device)
     model = cast(torch.jit.ScriptModule, JIT_DEPTH_NOISE_GENERATOR)
     if use_jit:
         depth_tensor[depth_tensor > max_depth] = 0.0  # depth larger than depth max is invalid
