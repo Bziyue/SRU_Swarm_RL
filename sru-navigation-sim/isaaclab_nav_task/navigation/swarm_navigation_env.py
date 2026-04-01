@@ -11,7 +11,7 @@ from isaaclab.assets import Articulation
 from isaaclab.envs import DirectMARLEnv
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import ContactSensor, RayCaster, RayCasterCamera
-from isaaclab.utils.math import quat_apply, quat_apply_inverse, quat_from_euler_xyz, yaw_quat
+from isaaclab.utils.math import euler_xyz_from_quat, quat_apply, quat_apply_inverse, quat_from_euler_xyz, yaw_quat
 
 from isaaclab_nav_task.navigation.mdp.events import setup_static_scan_world
 from isaaclab_nav_task.navigation.mdp.navigation.static_region_goal_commands import (
@@ -19,6 +19,7 @@ from isaaclab_nav_task.navigation.mdp.navigation.static_region_goal_commands imp
     _load_guidance_centerlines,
 )
 from isaaclab_nav_task.navigation.mdp.observations import depth_image_prefect, height_scan_feat
+from isaaclab_nav_task.navigation.utils.controller import Controller
 
 from .config.drone_swarm.swarm_env_cfg import DroneSwarmNavigationEnvCfg
 
@@ -92,12 +93,83 @@ class DroneSwarmNavigationEnv(DirectMARLEnv):
         self._processed_actions = {
             agent: torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device) for agent in self.agent_ids
         }
+        self._command_target_actions = {
+            agent: torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device) for agent in self.agent_ids
+        }
+        self._delayed_actions = {
+            agent: torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device) for agent in self.agent_ids
+        }
+        self._filtered_actions = {
+            agent: torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device) for agent in self.agent_ids
+        }
+        self._applied_actions = {
+            agent: torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device) for agent in self.agent_ids
+        }
         self._previous_actions = {
             agent: torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device) for agent in self.agent_ids
         }
         self._desired_velocity_w = {
             agent: torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device) for agent in self.agent_ids
         }
+        self._desired_acceleration_w = {
+            agent: torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device) for agent in self.agent_ids
+        }
+        self._desired_position_w = {
+            agent: torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device) for agent in self.agent_ids
+        }
+        self._desired_jerk_w = {
+            agent: torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device) for agent in self.agent_ids
+        }
+        self._desired_yaw = {
+            agent: torch.zeros((self.num_envs, 1), dtype=torch.float32, device=self.device) for agent in self.agent_ids
+        }
+        self._desired_yaw_rate = {
+            agent: torch.zeros((self.num_envs, 1), dtype=torch.float32, device=self.device) for agent in self.agent_ids
+        }
+        self._yaw_initialized = {
+            agent: torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device) for agent in self.agent_ids
+        }
+        self._execution_delay_steps = {
+            agent: torch.zeros((self.num_envs,), dtype=torch.int, device=self.device) for agent in self.agent_ids
+        }
+        self._delay_steps_remaining = {
+            agent: torch.zeros((self.num_envs,), dtype=torch.int, device=self.device) for agent in self.agent_ids
+        }
+        self._action_lag_blend = {
+            agent: torch.ones((self.num_envs, 1), dtype=torch.float32, device=self.device) for agent in self.agent_ids
+        }
+        self._execution_scale = {
+            agent: torch.ones((self.num_envs, 3), dtype=torch.float32, device=self.device) for agent in self.agent_ids
+        }
+        self._execution_bias = {
+            agent: torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device) for agent in self.agent_ids
+        }
+        self._root_twist_command = {
+            agent: torch.zeros((self.num_envs, 6), dtype=torch.float32, device=self.device) for agent in self.agent_ids
+        }
+        self._controller_counter = {agent: 0 for agent in self.agent_ids}
+        self._body_ids = {agent: robot.find_bodies("body")[0] for agent, robot in self.robots.items()}
+        self._root_force_command = {
+            agent: torch.zeros((self.num_envs, 1, 3), dtype=torch.float32, device=self.device) for agent in self.agent_ids
+        }
+        self._root_torque_command = {
+            agent: torch.zeros((self.num_envs, 1, 3), dtype=torch.float32, device=self.device) for agent in self.agent_ids
+        }
+        gravity = torch.tensor(self.sim.cfg.gravity, device=self.device, dtype=torch.float32)
+        self._controllers = {}
+        for agent, robot in self.robots.items():
+            mass = robot.root_physx_view.get_masses()[0, 0].to(device=self.device, dtype=torch.float32)
+            inertia = robot.root_physx_view.get_inertias()[0, 0].to(device=self.device, dtype=torch.float32)
+            controller_dt = self.cfg.controller_decimation * self.physics_dt
+            self._controllers[agent] = Controller(
+                step_dt=controller_dt,
+                gravity=gravity,
+                mass=mass,
+                inertia=inertia,
+                num_envs=self.num_envs,
+                k_max_ang=self.cfg.controller_k_max_ang,
+            )
+            self._randomize_execution_model(agent, torch.arange(self.num_envs, device=self.device))
 
         self.cluster_spawn_center = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
         self.cluster_goal_center = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
@@ -169,32 +241,190 @@ class DroneSwarmNavigationEnv(DirectMARLEnv):
         for agent in self.agent_ids:
             self.actions[agent] = actions[agent].clone()
             self._processed_actions[agent] = torch.tanh(self.actions[agent]) * self._action_scale
+            self._processed_actions[agent][:, :2] = torch.clamp(
+                self._processed_actions[agent][:, :2],
+                min=-self.cfg.max_acceleration,
+                max=self.cfg.max_acceleration,
+            )
+            self._command_target_actions[agent][:] = self._processed_actions[agent]
+            if self.cfg.enable_execution_delay:
+                self._delay_steps_remaining[agent][:] = self._execution_delay_steps[agent]
+            else:
+                self._delay_steps_remaining[agent].zero_()
+                self._delayed_actions[agent][:] = self._command_target_actions[agent]
+            self._desired_velocity_w[agent].zero_()
+            self._desired_velocity_w[agent][:, :2] = self.robots[agent].data.root_lin_vel_w[:, :2]
+            self._clip_planar_speed_(self._desired_velocity_w[agent])
 
     def _apply_action(self):
         for agent, robot in self.robots.items():
-            processed = self._processed_actions[agent]
-            yaw_only_quat = yaw_quat(robot.data.root_quat_w)
-            planar_acc_body = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
-            planar_acc_body[:, :2] = processed[:, :2]
-            planar_acc_world = quat_apply(yaw_only_quat, planar_acc_body)
+            self._advance_desired_motion(agent, robot)
+            if self.cfg.use_controller:
+                self._apply_controller_actions(agent, robot)
+            else:
+                self._apply_ideal_actions(agent, robot)
 
-            desired_vel = self._desired_velocity_w[agent]
-            desired_vel[:, :2] += planar_acc_world[:, :2] * self.physics_dt
-            desired_vel[:, 2] = 0.0
-            speed_xy = torch.linalg.norm(desired_vel[:, :2], dim=1, keepdim=True).clamp_min(1e-6)
-            desired_vel[:, :2] = torch.where(
-                speed_xy > self.cfg.max_speed,
-                desired_vel[:, :2] * (self.cfg.max_speed / speed_xy),
-                desired_vel[:, :2],
+    def _clip_planar_speed_(self, planar_velocity_w: torch.Tensor) -> None:
+        speed_xy = torch.linalg.norm(planar_velocity_w[:, :2], dim=1, keepdim=True)
+        clip_scale = torch.clamp(speed_xy / self.cfg.max_speed, min=1.0)
+        planar_velocity_w[:, :2] /= clip_scale
+
+    def _sample_uniform_range(self, value_range: tuple[float, float], shape: tuple[int, ...]) -> torch.Tensor:
+        low, high = value_range
+        if high <= low:
+            return torch.full(shape, low, device=self.device)
+        return torch.rand(shape, device=self.device) * (high - low) + low
+
+    def _randomize_execution_model(self, agent: str, env_ids: torch.Tensor) -> None:
+        if env_ids.numel() == 0:
+            return
+
+        if self.cfg.enable_execution_delay:
+            min_delay, max_delay = self.cfg.execution_delay_steps_range
+            if max_delay <= min_delay:
+                sampled_delay = torch.full((len(env_ids),), min_delay, dtype=torch.int, device=self.device)
+            else:
+                sampled_delay = torch.randint(
+                    min_delay, max_delay + 1, (len(env_ids),), dtype=torch.int, device=self.device
+                )
+            self._execution_delay_steps[agent][env_ids] = sampled_delay
+        else:
+            self._execution_delay_steps[agent][env_ids] = 0
+
+        if self.cfg.enable_action_lag:
+            tau = self._sample_uniform_range(self.cfg.action_lag_time_constant_range_s, (len(env_ids), 1))
+            tau = torch.clamp(tau, min=self.physics_dt)
+            self._action_lag_blend[agent][env_ids] = 1.0 - torch.exp(-self.physics_dt / tau)
+        else:
+            self._action_lag_blend[agent][env_ids] = 1.0
+
+        self._execution_scale[agent][env_ids, :2] = self._sample_uniform_range(
+            self.cfg.execution_scale_range_xy, (len(env_ids), 2)
+        )
+        self._execution_scale[agent][env_ids, 2:3] = self._sample_uniform_range(
+            self.cfg.execution_scale_range_yaw, (len(env_ids), 1)
+        )
+        self._execution_bias[agent][env_ids, :2] = self._sample_uniform_range(
+            self.cfg.execution_bias_range_xy, (len(env_ids), 2)
+        )
+        self._execution_bias[agent][env_ids, 2:3] = self._sample_uniform_range(
+            self.cfg.execution_bias_range_yaw, (len(env_ids), 1)
+        )
+
+    def _update_delayed_actions(self, agent: str) -> None:
+        if not self.cfg.enable_execution_delay:
+            self._delayed_actions[agent][:] = self._command_target_actions[agent]
+            return
+
+        active_mask = self._delay_steps_remaining[agent] > 0
+        self._delay_steps_remaining[agent][active_mask] -= 1
+        ready_mask = self._delay_steps_remaining[agent] == 0
+        self._delayed_actions[agent][ready_mask] = self._command_target_actions[agent][ready_mask]
+
+    def _apply_execution_model(self, agent: str) -> None:
+        self._update_delayed_actions(agent)
+
+        target_actions = self._delayed_actions[agent] * self._execution_scale[agent] + self._execution_bias[agent]
+        if self.cfg.enable_action_lag:
+            self._filtered_actions[agent][:] = self._filtered_actions[agent] + self._action_lag_blend[agent] * (
+                target_actions - self._filtered_actions[agent]
             )
+        else:
+            self._filtered_actions[agent][:] = target_actions
 
-            root_pose = torch.cat((robot.data.root_pos_w.clone(), yaw_only_quat), dim=-1)
-            root_pose[:, 2] = self.cfg.flight_height
-            root_velocity = torch.zeros((self.num_envs, 6), dtype=torch.float32, device=self.device)
-            root_velocity[:, :2] = desired_vel[:, :2]
-            root_velocity[:, 5] = processed[:, 2]
-            robot.write_root_pose_to_sim(root_pose)
-            robot.write_root_velocity_to_sim(root_velocity)
+        noise_xy = self._sample_uniform_range(self.cfg.execution_noise_range_xy, (self.num_envs, 2))
+        noise_yaw = self._sample_uniform_range(self.cfg.execution_noise_range_yaw, (self.num_envs, 1))
+        self._applied_actions[agent][:] = self._filtered_actions[agent]
+        self._applied_actions[agent][:, :2] += noise_xy
+        self._applied_actions[agent][:, 2:3] += noise_yaw
+        self._applied_actions[agent][:, :2] = torch.clamp(
+            self._applied_actions[agent][:, :2],
+            min=-self.cfg.max_acceleration,
+            max=self.cfg.max_acceleration,
+        )
+
+    def _initialize_desired_yaw(self, agent: str, robot: Articulation, env_ids: torch.Tensor | None = None) -> None:
+        if env_ids is None:
+            env_ids = torch.nonzero(~self._yaw_initialized[agent], as_tuple=False).squeeze(-1)
+        if env_ids.numel() == 0:
+            return
+
+        root_yaw_quat = yaw_quat(robot.data.root_quat_w[env_ids])
+        root_yaw = euler_xyz_from_quat(root_yaw_quat)[2].unsqueeze(1)
+        self._desired_yaw[agent][env_ids] = root_yaw
+        self._yaw_initialized[agent][env_ids] = True
+
+    def _compute_planar_acceleration_world(self, robot: Articulation, planar_actions: torch.Tensor) -> torch.Tensor:
+        yaw_only_quat = yaw_quat(robot.data.root_quat_w)
+        planar_acc_body = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
+        planar_acc_body[:, :2] = planar_actions[:, :2]
+        planar_acc_world = quat_apply(yaw_only_quat, planar_acc_body)
+        planar_acc_world[:, :2] = torch.clamp(
+            planar_acc_world[:, :2],
+            min=-self.cfg.max_acceleration,
+            max=self.cfg.max_acceleration,
+        )
+        return planar_acc_world
+
+    def _advance_desired_motion(self, agent: str, robot: Articulation) -> None:
+        self._initialize_desired_yaw(agent, robot)
+        self._apply_execution_model(agent)
+        self._desired_acceleration_w[agent].zero_()
+        self._desired_acceleration_w[agent][:] = self._compute_planar_acceleration_world(
+            robot, self._applied_actions[agent]
+        )
+        self._desired_velocity_w[agent][:, :2] += self._desired_acceleration_w[agent][:, :2] * self.physics_dt
+        self._clip_planar_speed_(self._desired_velocity_w[agent])
+        self._desired_yaw_rate[agent][:] = self._applied_actions[agent][:, 2:3]
+        self._desired_yaw[agent][:] = self._desired_yaw[agent] + self._desired_yaw_rate[agent] * self.physics_dt
+
+    def _apply_ideal_actions(self, agent: str, robot: Articulation) -> None:
+        root_pos = robot.data.root_pos_w.clone()
+        yaw_only_quat = yaw_quat(robot.data.root_quat_w)
+
+        pose = torch.cat((root_pos, yaw_only_quat), dim=-1)
+        pose[:, 2] = self.cfg.flight_height
+        robot.write_root_pose_to_sim(pose)
+
+        self._root_twist_command[agent][:, 0:2] = self._desired_velocity_w[agent][:, 0:2]
+        self._root_twist_command[agent][:, 2] = 0.0
+        self._root_twist_command[agent][:, 3:5] = 0.0
+        self._root_twist_command[agent][:, 5] = self._desired_yaw_rate[agent][:, 0]
+        robot.write_root_velocity_to_sim(self._root_twist_command[agent])
+
+    def _apply_controller_actions(self, agent: str, robot: Articulation) -> None:
+        root_pos = robot.data.root_pos_w
+
+        self._desired_position_w[agent][:] = root_pos
+        self._desired_position_w[agent][:, 2] = self.cfg.flight_height
+
+        if self._controller_counter[agent] % self.cfg.controller_decimation == 0:
+            desired_state = torch.cat(
+                (
+                    self._desired_position_w[agent],
+                    self._desired_velocity_w[agent],
+                    self._desired_acceleration_w[agent],
+                    self._desired_jerk_w[agent],
+                    self._desired_yaw[agent],
+                    self._desired_yaw_rate[agent],
+                ),
+                dim=1,
+            )
+            _, thrust, _, _, torque = self._controllers[agent].get_control(
+                robot.data.root_state_w,
+                desired_state,
+            )
+            self._root_force_command[agent].zero_()
+            self._root_force_command[agent][:, 0, 2] = thrust
+            self._root_torque_command[agent][:, 0, :] = torque
+            self._controller_counter[agent] = 0
+
+        self._controller_counter[agent] += 1
+        robot.set_external_force_and_torque(
+            self._root_force_command[agent],
+            self._root_torque_command[agent],
+            body_ids=self._body_ids[agent],
+        )
 
     def _encode_teammate_features(
         self, rel_pos_b: torch.Tensor, rel_dist: torch.Tensor, visible: torch.Tensor
@@ -599,8 +829,25 @@ class DroneSwarmNavigationEnv(DirectMARLEnv):
         for agent in self.agent_ids:
             self.actions[agent][env_ids] = 0.0
             self._processed_actions[agent][env_ids] = 0.0
+            self._command_target_actions[agent][env_ids] = 0.0
+            self._delayed_actions[agent][env_ids] = 0.0
+            self._filtered_actions[agent][env_ids] = 0.0
+            self._applied_actions[agent][env_ids] = 0.0
             self._previous_actions[agent][env_ids] = 0.0
             self._desired_velocity_w[agent][env_ids] = 0.0
+            self._desired_acceleration_w[agent][env_ids] = 0.0
+            self._desired_position_w[agent][env_ids] = 0.0
+            self._desired_jerk_w[agent][env_ids] = 0.0
+            self._desired_yaw[agent][env_ids] = 0.0
+            self._desired_yaw_rate[agent][env_ids] = 0.0
+            self._yaw_initialized[agent][env_ids] = False
+            self._delay_steps_remaining[agent][env_ids] = 0
+            self._root_twist_command[agent][env_ids] = 0.0
+            self._root_force_command[agent][env_ids] = 0.0
+            self._root_torque_command[agent][env_ids] = 0.0
+            self._controller_counter[agent] = 0
+            self._controllers[agent].reset(env_ids)
+            self._randomize_execution_model(agent, env_ids)
 
         (
             source_region_ids,

@@ -34,7 +34,7 @@ def _make_swarm_policy_cfg() -> RslRlPpoActorCriticCfg:
 
 @configclass
 class DroneSwarmNavIPPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    num_steps_per_env = 16
+    num_steps_per_env = 32
     max_iterations = 15000
     save_interval = 500
     logger = "tensorboard"

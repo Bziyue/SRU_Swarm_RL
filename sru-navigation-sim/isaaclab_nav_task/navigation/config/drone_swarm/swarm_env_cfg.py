@@ -211,8 +211,22 @@ class DroneSwarmNavigationEnvCfg(DirectMARLEnvCfg):
     guidance_trajectory_eval_dt: float = 0.05
     guidance_arc_length_spacing: float = 0.2
 
-    action_scale: tuple[float, float, float] = (2.5, 2.5, 1.5)
-    max_speed: float = 2.5
+    action_scale: tuple[float, float, float] = (1.0, 1.0, 1.5)
+    max_acceleration: float = 1.0
+    max_speed: float = 1.0
+    use_controller: bool = True
+    controller_decimation: int = 2
+    controller_k_max_ang: float = 30.0
+    enable_execution_delay: bool = True
+    execution_delay_steps_range: tuple[int, int] = (4, 6)
+    enable_action_lag: bool = True
+    action_lag_time_constant_range_s: tuple[float, float] = (0.04, 0.06)
+    execution_scale_range_xy: tuple[float, float] = (0.98, 1.02)
+    execution_scale_range_yaw: tuple[float, float] = (0.98, 1.02)
+    execution_bias_range_xy: tuple[float, float] = (-0.02, 0.02)
+    execution_bias_range_yaw: tuple[float, float] = (-0.015, 0.015)
+    execution_noise_range_xy: tuple[float, float] = (-0.02, 0.02)
+    execution_noise_range_yaw: tuple[float, float] = (-0.01, 0.01)
     depth_include_teammates: bool = False
     goal_sampling_mode: str = "region_center_anchor"
     teammate_observation_radius: float = 6.0
