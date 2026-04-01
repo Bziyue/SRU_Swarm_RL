@@ -883,7 +883,17 @@ class EgoTeammateContextEncoder(nn.Module):
             key_padding_mask[missing, 0] = False
 
         query = self.ego_query(ego_emb).unsqueeze(1)
-        team_ctx, _ = self.attention(query, teammate_emb, teammate_emb, key_padding_mask=key_padding_mask, need_weights=False)
+        # Force the math SDPA backend for this small masked attention block.
+        # Some server GPU / PyTorch combinations hit invalid CUDA kernel launches
+        # with the fused SDPA path when key_padding_mask is present.
+        with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_math=True, enable_mem_efficient=False):
+            team_ctx, _ = self.attention(
+                query,
+                teammate_emb,
+                teammate_emb,
+                key_padding_mask=key_padding_mask,
+                need_weights=False,
+            )
         team_ctx = team_ctx.squeeze(1)
         team_ctx = torch.where(has_visible.unsqueeze(-1), team_ctx, torch.zeros_like(team_ctx))
         return torch.cat((ego_obs, ego_emb, team_ctx), dim=-1)
