@@ -214,7 +214,7 @@ class DroneSwarmNavigationEnvCfg(DirectMARLEnvCfg):
     action_scale: tuple[float, float, float] = (1.0, 1.0, 1.5)
     max_acceleration: float = 1.0
     max_speed: float = 1.0
-    use_controller: bool = True
+    use_controller: bool = False
     controller_decimation: int = 2
     controller_k_max_ang: float = 30.0
     enable_execution_delay: bool = True
